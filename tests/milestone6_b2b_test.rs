@@ -5,10 +5,11 @@
 use sonaraim_b2b::billing::SaasPlanTier;
 use sonaraim_b2b::config::B2bConfig;
 use sonaraim_b2b::http_api::{B2bState, start_test_server};
-use sonaraim_b2b::outbound_dispatcher::post_json_with_timeout;
+use sonaraim_b2b::outbound_dispatcher::{post_json_with_timeout, start_ai_stream_listener};
 use sonaraim_b2b::persistence::{check_redis_rate_limit, load_snapshot, save_snapshot};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -260,4 +261,50 @@ fn outbound_webhook_dispatcher_and_node_relay_forwarding_work() {
     assert!(err_res.is_err());
 
     drop(b2b_handle);
+}
+
+#[test]
+fn ai_agent_stream_listener_and_prometheus_metrics_endpoint_work() {
+    let mut state = B2bState::new(sample_config(10));
+    state.register_tenant(
+        "did:web:ai.example.com",
+        "sk_ai_1",
+        SaasPlanTier::EnterpriseSovereign,
+        50,
+    );
+
+    let shared = Arc::new(Mutex::new(state.clone()));
+    let (stream_addr, stream_handle) =
+        start_ai_stream_listener("127.0.0.1", 0, shared).expect("start ai stream listener");
+
+    let mut tcp = TcpStream::connect(&stream_addr).expect("connect to ai stream");
+    tcp.write_all(b"{\"agent_did\":\"did:sonaraim:agent-1\",\"prompt\":\"Summarize order #42\"}\n")
+        .expect("write ai frame");
+    let _ = tcp.shutdown(std::net::Shutdown::Write);
+    let mut streamed = String::new();
+    tcp.read_to_string(&mut streamed)
+        .expect("read streamed response");
+    assert!(streamed.contains("\"stream\":\"sonaraim.ai.v1\""));
+    assert!(streamed.contains("\"agent_did\":\"did:sonaraim:agent-1\""));
+    assert!(streamed.contains("\"toll_free\":true"));
+    drop(stream_handle);
+
+    let (http_addr, http_handle) = start_test_server(state).expect("start http server");
+    let auth = [("Authorization", "Bearer sk_ai_1")];
+    let (st, _) = send_http(
+        &http_addr,
+        "POST",
+        "/v1/messages",
+        &auth,
+        r#"{"recipient_did":"did:sonaraim:dave","category":"TRANSACTIONAL","onboarded":false}"#,
+    );
+    assert_eq!(st, 202);
+
+    let (st, metrics_body) = send_http(&http_addr, "GET", "/metrics", &[], "");
+    assert_eq!(st, 200);
+    assert!(metrics_body.contains("sonaraim_b2b_tenants_total 1"));
+    assert!(metrics_body.contains("sonaraim_b2b_messages_sent_total 1"));
+    assert!(metrics_body.contains("sonaraim_b2b_card_actions_total 0"));
+
+    drop(http_handle);
 }

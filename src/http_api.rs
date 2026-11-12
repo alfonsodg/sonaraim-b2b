@@ -5,8 +5,10 @@ use crate::billing::SaasPlanTier;
 use crate::config::B2bConfig;
 use crate::consent::MessageCategory;
 use crate::fallback::{DeliveryRoute, SmartFallbackEngine};
-use crate::outbound_dispatcher::forward_to_node_relay;
-use crate::persistence::{authorize_promo, handle_register_tenant, persist_if_configured};
+use crate::outbound_dispatcher::{forward_to_node_relay, start_ai_stream_listener};
+use crate::persistence::{
+    authorize_promo, handle_metrics, handle_register_tenant, persist_if_configured,
+};
 use crate::routes::{
     handle_card_action, handle_crm_event, handle_payment_intent, handle_revoke_consent,
     handle_tenant_analytics, handle_tenant_subscription, handle_whatsapp_compat,
@@ -135,11 +137,15 @@ pub fn start_test_server(state: B2bState) -> Result<(String, JoinHandle<()>), io
     Ok((addr, handle))
 }
 
-/// Starts the B2B HTTP server on the configured `B2B_HTTP_HOST:B2B_HTTP_PORT`.
+/// Starts the B2B HTTP server on the configured `B2B_HTTP_HOST:B2B_HTTP_PORT` and
+/// the AI Agent stream listener on `B2B_HTTP_HOST:B2B_GRPC_PORT`.
 pub fn run_server(state: B2bState) -> Result<(), io::Error> {
     let addr = format!("{}:{}", state.config.http_host, state.config.http_port);
+    let grpc_host = state.config.http_host.clone();
+    let grpc_port = state.config.grpc_port;
     let listener = TcpListener::bind(addr)?;
     let shared = Arc::new(Mutex::new(state));
+    let _ = start_ai_stream_listener(&grpc_host, grpc_port, Arc::clone(&shared));
     serve_loop(listener, shared);
     Ok(())
 }
@@ -166,6 +172,7 @@ fn route_request(req: &HttpRequest, shared: &Arc<Mutex<B2bState>>) -> (u16, &'st
             "OK",
             r#"{"status":"ok","service":"sonaraim-b2b"}"#.to_string(),
         ),
+        ("GET", "/metrics") => handle_metrics(shared),
         ("POST", "/v1/tenants") => handle_register_tenant(req, shared),
         ("POST", "/v1/messages") => handle_dispatch_message(req, shared),
         ("POST", "/v1/cards/actions") => handle_card_action(req, shared),

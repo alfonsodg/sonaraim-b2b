@@ -222,3 +222,21 @@ pub(crate) fn authorize_promo(
     }
     None
 }
+
+/// Renders Prometheus exposition format metrics (`GET /metrics`) for `sonaraim-b2b`.
+pub fn handle_metrics(shared: &Arc<Mutex<B2bState>>) -> (u16, &'static str, String) {
+    let Ok(guard) = shared.lock() else {
+        return (
+            500,
+            "Internal Server Error",
+            r#"{"error":"state_lock_poisoned"}"#.to_string(),
+        );
+    };
+    let tenants_total = guard.tenants.len();
+    let messages_total: u64 = guard.tenants.values().map(|t| t.messages_sent).sum();
+    let actions_total: u64 = guard.tenants.values().map(|t| t.card_actions).sum();
+    let body = format!(
+        "# HELP sonaraim_b2b_tenants_total Total registered enterprise tenants\n# TYPE sonaraim_b2b_tenants_total gauge\nsonaraim_b2b_tenants_total {tenants_total}\n# HELP sonaraim_b2b_messages_sent_total Total B2B messages dispatched\n# TYPE sonaraim_b2b_messages_sent_total counter\nsonaraim_b2b_messages_sent_total {messages_total}\n# HELP sonaraim_b2b_card_actions_total Total signed card actions processed\n# TYPE sonaraim_b2b_card_actions_total counter\nsonaraim_b2b_card_actions_total {actions_total}\n"
+    );
+    (200, "OK", body)
+}

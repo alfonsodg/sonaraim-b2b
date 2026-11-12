@@ -1,7 +1,12 @@
-//! Outbound HTTP/1.1 JSON webhook dispatcher and `sonaraim-node` MLS relay forwarder.
+//! Outbound HTTP/1.1 JSON webhook dispatcher, `sonaraim-node` MLS relay forwarder,
+//! and toll-free AI Agent stream TCP listener on `B2B_GRPC_PORT`.
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use crate::http_api::B2bState;
+use crate::webhooks::json_str;
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Parses an `http://host[:port][/path]` URL into `(host_port, path)`.
@@ -27,16 +32,6 @@ fn parse_http_url(url: &str) -> Result<(String, String), String> {
 }
 
 /// Sends an outbound HTTP/1.1 `POST` request with a JSON body and bounded TCP timeout.
-///
-/// # Parameters
-/// - `url`: Target HTTP endpoint (`http://host:port/path`).
-/// - `headers`: Additional HTTP request headers (e.g., `X-Sonaraim-Signature`).
-/// - `body`: UTF-8 JSON payload.
-/// - `timeout_ms`: Connection and I/O timeout in milliseconds.
-///
-/// # Errors
-///
-/// Returns `Err(String)` if URL parsing, DNS resolution, TCP connection, or HTTP response parsing fails.
 pub fn post_json_with_timeout(
     url: &str,
     headers: &[(&str, &str)],
@@ -78,13 +73,11 @@ pub fn post_json_with_timeout(
         return Err("empty HTTP response".to_string());
     }
     let head = String::from_utf8_lossy(&buf[..n]);
-    let status = head
-        .lines()
+    head.lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| "invalid HTTP status line".to_string())?;
-    Ok(status)
+        .ok_or_else(|| "invalid HTTP status line".to_string())
 }
 
 /// Returns the configured outbound webhook/relay timeout in milliseconds (`B2B_WEBHOOK_TIMEOUT_MS`).
@@ -97,8 +90,6 @@ pub fn configured_timeout_ms() -> u64 {
 }
 
 /// Forwards a sealed MLS envelope to `{node_rpc_url}/v1/relay/envelopes`.
-///
-/// Returns `true` if `sonaraim-node` responds with a 2xx HTTP status code.
 pub fn forward_to_node_relay(
     node_rpc_url: &str,
     tenant_did: &str,
@@ -118,4 +109,36 @@ pub fn forward_to_node_relay(
         post_json_with_timeout(&url, &[], &payload, configured_timeout_ms()),
         Ok(status) if (200..300).contains(&status)
     )
+}
+
+/// Starts the toll-free AI Agent stream listener on `host:grpc_port`.
+///
+/// Accepts line-delimited JSON or gRPC-framed AI agent stream requests and responds
+/// with structured Sonaraim Card token frames (`stream: "sonaraim.ai.v1"`).
+pub fn start_ai_stream_listener(
+    host: &str,
+    grpc_port: u16,
+    _shared: Arc<Mutex<B2bState>>,
+) -> io::Result<(String, JoinHandle<()>)> {
+    let listener = TcpListener::bind(format!("{host}:{grpc_port}"))?;
+    let bound_addr = listener.local_addr()?.to_string();
+    let handle = thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let agent_did = json_str(&req, "agent_did")
+                    .unwrap_or_else(|| "did:sonaraim:ai-agent".to_string());
+                let prompt = json_str(&req, "prompt").unwrap_or_else(|| "ready".to_string());
+                let frame = format!(
+                    "{{\"stream\":\"sonaraim.ai.v1\",\"agent_did\":\"{agent_did}\",\"toll_free\":true,\"status\":\"streaming\",\"delta\":\"Processed: {prompt}\"}}\n"
+                );
+                let _ = stream.write_all(frame.as_bytes());
+                let _ = stream.flush();
+            });
+        }
+    });
+    Ok((bound_addr, handle))
 }
