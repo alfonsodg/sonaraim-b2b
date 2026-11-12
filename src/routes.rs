@@ -90,11 +90,25 @@ pub(crate) fn handle_card_action(
         tenant.card_actions += 1;
     }
     let webhook_sig = compute_webhook_signature(&req.body);
+    let delivered = json_str(&req.body, "callback_url")
+        .filter(|u| !u.trim().is_empty())
+        .is_some_and(|url| {
+            let timeout = crate::outbound_dispatcher::configured_timeout_ms();
+            matches!(
+                crate::outbound_dispatcher::post_json_with_timeout(
+                    &url,
+                    &[("X-Sonaraim-Signature", &webhook_sig)],
+                    &req.body,
+                    timeout
+                ),
+                Ok(st) if (200..300).contains(&st)
+            )
+        });
     (
         200,
         "OK",
         format!(
-            r#"{{"status":"recorded","verified":true,"X-Sonaraim-Signature":"{webhook_sig}"}}"#
+            r#"{{"status":"recorded","verified":true,"webhook_delivered":{delivered},"X-Sonaraim-Signature":"{webhook_sig}"}}"#
         ),
     )
 }

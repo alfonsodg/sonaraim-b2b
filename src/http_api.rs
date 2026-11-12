@@ -5,6 +5,7 @@ use crate::billing::SaasPlanTier;
 use crate::config::B2bConfig;
 use crate::consent::MessageCategory;
 use crate::fallback::{DeliveryRoute, SmartFallbackEngine};
+use crate::outbound_dispatcher::forward_to_node_relay;
 use crate::persistence::{authorize_promo, handle_register_tenant, persist_if_configured};
 use crate::routes::{
     handle_card_action, handle_crm_event, handle_payment_intent, handle_revoke_consent,
@@ -249,16 +250,26 @@ fn handle_dispatch_message(
             r#"{"error":"invalid_recipient"}"#.to_string(),
         );
     };
+    let mut seq = 0u64;
     if let Some(tenant) = guard.tenants.get_mut(&tenant_did) {
         tenant.messages_sent += 1;
+        seq = tenant.messages_sent;
     }
     persist_if_configured(&guard);
     match route {
-        DeliveryRoute::NativeMlsE2ee { .. } => (
-            202,
-            "Accepted",
-            format!(r#"{{"status":"queued","route":"NATIVE_MLS_E2EE","recipient":"{recipient}"}}"#),
-        ),
+        DeliveryRoute::NativeMlsE2ee {
+            node_rpc_url,
+            recipient_did,
+        } => {
+            let relayed = forward_to_node_relay(&node_rpc_url, &tenant_did, &recipient_did, seq);
+            (
+                202,
+                "Accepted",
+                format!(
+                    r#"{{"status":"queued","route":"NATIVE_MLS_E2EE","recipient":"{recipient}","relayed":{relayed}}}"#
+                ),
+            )
+        }
         DeliveryRoute::InstantClip { magic_link_url, .. } => (
             202,
             "Accepted",

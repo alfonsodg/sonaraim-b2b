@@ -5,6 +5,7 @@
 use sonaraim_b2b::billing::SaasPlanTier;
 use sonaraim_b2b::config::B2bConfig;
 use sonaraim_b2b::http_api::{B2bState, start_test_server};
+use sonaraim_b2b::outbound_dispatcher::post_json_with_timeout;
 use sonaraim_b2b::persistence::{check_redis_rate_limit, load_snapshot, save_snapshot};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -176,4 +177,87 @@ fn redis_resp_rate_limiter_enforces_promotional_rps_over_tcp() {
     let mut s = B2bState::new(sample_config(2));
     s.register_tenant("did:web:t.example.com", "k", SaasPlanTier::Free, 1);
     assert_eq!(s.tenants.len(), 1);
+}
+
+#[test]
+fn outbound_webhook_dispatcher_and_node_relay_forwarding_work() {
+    // 1. Mock sonaraim-node listener for /v1/relay/envelopes
+    let node_listener = TcpListener::bind("127.0.0.1:0").expect("bind mock node");
+    let node_addr = node_listener.local_addr().expect("node addr").to_string();
+    let node_handle = thread::spawn(move || {
+        let (mut stream, _) = node_listener.accept().expect("accept node relay");
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).expect("read relay req");
+        let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+        let reply = "HTTP/1.1 202 Accepted\r\nContent-Length: 23\r\nConnection: close\r\n\r\n{\"wake_up_token\":\"wk1\"}";
+        stream
+            .write_all(reply.as_bytes())
+            .expect("write relay resp");
+        req_str
+    });
+
+    // 2. Mock merchant webhook listener for /v1/cards/actions callback_url
+    let hook_listener = TcpListener::bind("127.0.0.1:0").expect("bind mock webhook");
+    let hook_addr = hook_listener.local_addr().expect("hook addr").to_string();
+    let hook_handle = thread::spawn(move || {
+        let (mut stream, _) = hook_listener.accept().expect("accept hook");
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).expect("read hook req");
+        let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+        let reply =
+            "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}";
+        stream.write_all(reply.as_bytes()).expect("write hook resp");
+        req_str
+    });
+
+    let mut cfg = sample_config(10);
+    cfg.node_rpc_url = format!("http://{node_addr}");
+    let mut state = B2bState::new(cfg);
+    state.register_tenant(
+        "did:web:merchant.example.com",
+        "sk_merchant_1",
+        SaasPlanTier::SmbPro,
+        5,
+    );
+    let (b2b_addr, b2b_handle) = start_test_server(state).expect("start b2b");
+    let auth = [("Authorization", "Bearer sk_merchant_1")];
+
+    // Dispatch onboarded message -> forwards to node /v1/relay/envelopes
+    let (st, msg_resp) = send_http(
+        &b2b_addr,
+        "POST",
+        "/v1/messages",
+        &auth,
+        r#"{"recipient_did":"did:sonaraim:carol","category":"TRANSACTIONAL","onboarded":true}"#,
+    );
+    assert_eq!(st, 202);
+    assert!(msg_resp.contains("\"route\":\"NATIVE_MLS_E2EE\""));
+    assert!(msg_resp.contains("\"relayed\":true"));
+
+    let captured_node_req = node_handle.join().expect("join node mock");
+    assert!(captured_node_req.starts_with("POST /v1/relay/envelopes HTTP/1.1"));
+    assert!(captured_node_req.contains("\"recipient_mailbox_id\":\"did:sonaraim:carol\""));
+
+    // Submit card action with callback_url -> dispatches signed webhook
+    let callback_url = format!("http://{hook_addr}/webhooks/sonaraim");
+    let body = format!(
+        r#"{{"card_id":"c-7","action_id":"pay","user_did":"did:sonaraim:carol","user_signature":"sig_valid_77","callback_url":"{callback_url}"}}"#
+    );
+    let (st, act_resp) = send_http(&b2b_addr, "POST", "/v1/cards/actions", &auth, &body);
+    assert_eq!(st, 200);
+    assert!(act_resp.contains("\"webhook_delivered\":true"));
+
+    let captured_hook_req = hook_handle.join().expect("join hook mock");
+    assert!(captured_hook_req.starts_with("POST /webhooks/sonaraim HTTP/1.1"));
+    assert!(
+        captured_hook_req
+            .to_ascii_lowercase()
+            .contains("x-sonaraim-signature: sha256=")
+    );
+
+    // Direct post_json_with_timeout against unreachable port returns Err cleanly
+    let err_res = post_json_with_timeout("http://127.0.0.1:9/unreachable", &[], "{}", 50);
+    assert!(err_res.is_err());
+
+    drop(b2b_handle);
 }
