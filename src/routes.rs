@@ -5,7 +5,7 @@ use crate::billing::{PaymentProvider, compute_take_rate_minor_units};
 use crate::crm_connectors::{CrmProvider, normalize_crm_event};
 use crate::http_api::B2bState;
 use crate::outbound_dispatcher::{
-    configured_timeout_ms, post_json_with_retry, sync_optional_upstream,
+    configured_timeout_ms, forward_to_node_relay, post_json_with_retry, sync_optional_upstream,
 };
 use crate::webhooks::{
     HttpRequest, compute_webhook_signature, json_str, json_u64, verify_webhook_signature,
@@ -13,38 +13,41 @@ use crate::webhooks::{
 use crate::whatsapp_adapter::{WhatsAppCloudAdapter, WhatsAppTemplateRequest};
 use std::sync::{Arc, Mutex};
 
-fn err_500() -> (u16, &'static str, String) {
-    (
-        500,
-        "Internal Server Error",
-        r#"{"error":"state_lock_poisoned"}"#.to_string(),
-    )
+fn err(status: u16, reason: &'static str, message: &str) -> (u16, &'static str, String) {
+    (status, reason, format!(r#"{{"error":"{message}"}}"#))
 }
 
-fn err_401() -> (u16, &'static str, String) {
-    (
-        401,
-        "Unauthorized",
-        r#"{"error":"unauthorized"}"#.to_string(),
-    )
-}
-
-/// Translates a legacy WhatsApp Cloud API payload into a declarative Sonaraim Card.
+/// Translates a legacy WhatsApp Cloud API payload into a declarative Sonaraim Card and forwards to relay.
 pub(crate) fn handle_whatsapp_compat(
     req: &HttpRequest,
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
-    let Ok(guard) = shared.lock() else {
-        return err_500();
+    let (node_rpc_url, tenant_did, seq) = {
+        let Ok(mut guard) = shared.lock() else {
+            return err(500, "Internal Server Error", "state_lock_poisoned");
+        };
+        let Some(tenant_did) = guard.authenticate(req) else {
+            return err(401, "Unauthorized", "unauthorized");
+        };
+        let mut seq = 0u64;
+        if let Some(tenant) = guard.tenants.get_mut(&tenant_did) {
+            tenant.messages_sent += 1;
+            seq = tenant.messages_sent;
+        }
+        (guard.config.node_rpc_url.clone(), tenant_did, seq)
     };
-    if guard.authenticate(req).is_none() {
-        return err_401();
-    }
-    drop(guard);
+    let raw_to = json_str(&req.body, "recipient_did")
+        .or_else(|| json_str(&req.body, "to"))
+        .unwrap_or_default();
+    let recipient_did = if raw_to.is_empty() || raw_to.starts_with("did:") {
+        raw_to
+    } else {
+        format!("did:sonaraim:{}", raw_to.trim())
+    };
     let wa_req = WhatsAppTemplateRequest {
         messaging_product: json_str(&req.body, "messaging_product")
             .unwrap_or_else(|| "whatsapp".to_string()),
-        to: json_str(&req.body, "to").unwrap_or_default(),
+        to: recipient_did.clone(),
         template_name: json_str(&req.body, "template_name")
             .or_else(|| json_str(&req.body, "template"))
             .unwrap_or_else(|| "default_template".to_string()),
@@ -55,6 +58,9 @@ pub(crate) fn handle_whatsapp_compat(
     };
     match WhatsAppCloudAdapter::translate(&wa_req) {
         Ok(card) => {
+            let card_json = card.to_json();
+            let relayed =
+                forward_to_node_relay(&node_rpc_url, &tenant_did, &recipient_did, seq, &card_json);
             let synced = sync_optional_upstream(
                 json_str(&req.body, "upstream_url"),
                 "B2B_WHATSAPP_UPSTREAM_URL",
@@ -64,12 +70,12 @@ pub(crate) fn handle_whatsapp_compat(
                 200,
                 "OK",
                 format!(
-                    r#"{{"messaging_product":"sonaraim","format":"SONARAIM_CARD","recipient":"{}","title":"{}","upstream_synced":{synced}}}"#,
+                    r#"{{"messaging_product":"sonaraim","format":"SONARAIM_CARD","recipient":"{}","title":"{}","upstream_synced":{synced},"relayed":{relayed}}}"#,
                     card.recipient, card.title
                 ),
             )
         }
-        Err(err) => (400, "Bad Request", format!(r#"{{"error":"{err}"}}"#)),
+        Err(e) => err(400, "Bad Request", &e.to_string()),
     }
 }
 
@@ -79,10 +85,10 @@ pub(crate) fn handle_card_action(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(mut guard) = shared.lock() else {
-        return err_500();
+        return err(500, "Internal Server Error", "state_lock_poisoned");
     };
     let Some(auth_tenant) = guard.authenticate(req) else {
-        return err_401();
+        return err(401, "Unauthorized", "unauthorized");
     };
     let header_sig = req
         .headers
@@ -91,11 +97,7 @@ pub(crate) fn handle_card_action(
         .unwrap_or_default();
     let user_sig = json_str(&req.body, "user_signature").unwrap_or(header_sig);
     if !verify_webhook_signature(&req.body, &user_sig) {
-        return (
-            401,
-            "Unauthorized",
-            r#"{"error":"invalid_signature"}"#.to_string(),
-        );
+        return err(401, "Unauthorized", "invalid_signature");
     }
     let tenant_did = json_str(&req.body, "tenant_did").unwrap_or(auth_tenant);
     if let Some(tenant) = guard.tenants.get_mut(&tenant_did) {
@@ -133,7 +135,7 @@ pub(crate) fn handle_tenant_analytics(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return err_500();
+        return err(500, "Internal Server Error", "state_lock_poisoned");
     };
     match guard.tenants.get(did) {
         Some(t) => (
@@ -144,11 +146,7 @@ pub(crate) fn handle_tenant_analytics(
                 t.did, t.messages_sent, t.card_actions
             ),
         ),
-        None => (
-            404,
-            "Not Found",
-            r#"{"error":"tenant_not_found"}"#.to_string(),
-        ),
+        None => err(404, "Not Found", "tenant_not_found"),
     }
 }
 
@@ -158,7 +156,7 @@ pub(crate) fn handle_tenant_subscription(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return err_500();
+        return err(500, "Internal Server Error", "state_lock_poisoned");
     };
     match guard.tenants.get(did) {
         Some(t) => (
@@ -171,11 +169,7 @@ pub(crate) fn handle_tenant_subscription(
                 t.max_seats
             ),
         ),
-        None => (
-            404,
-            "Not Found",
-            r#"{"error":"tenant_not_found"}"#.to_string(),
-        ),
+        None => err(404, "Not Found", "tenant_not_found"),
     }
 }
 
@@ -185,18 +179,14 @@ pub(crate) fn handle_revoke_consent(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(mut guard) = shared.lock() else {
-        return err_500();
+        return err(500, "Internal Server Error", "state_lock_poisoned");
     };
     let Some(tenant_did) = guard.authenticate(req) else {
-        return err_401();
+        return err(401, "Unauthorized", "unauthorized");
     };
     let user_did = json_str(&req.body, "user_did").unwrap_or_default();
     if user_did.trim().is_empty() {
-        return (
-            400,
-            "Bad Request",
-            r#"{"error":"missing_user_did"}"#.to_string(),
-        );
+        return err(400, "Bad Request", "missing_user_did");
     }
     guard
         .revoked_consents
@@ -211,19 +201,15 @@ pub(crate) fn handle_payment_intent(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return err_500();
+        return err(500, "Internal Server Error", "state_lock_poisoned");
     };
     if guard.authenticate(req).is_none() {
-        return err_401();
+        return err(401, "Unauthorized", "unauthorized");
     }
     drop(guard);
     let provider_str = json_str(&req.body, "provider").unwrap_or_default();
     let Some(provider) = PaymentProvider::parse(&provider_str) else {
-        return (
-            400,
-            "Bad Request",
-            r#"{"error":"unsupported_payment_provider"}"#.to_string(),
-        );
+        return err(400, "Bad Request", "unsupported_payment_provider");
     };
     let amount = json_u64(&req.body, "amount_minor").unwrap_or(0);
     let bps = json_u64(&req.body, "take_rate_bps").unwrap_or(50);
@@ -246,7 +232,7 @@ pub(crate) fn handle_payment_intent(
                 ),
             )
         }
-        Err(err) => (400, "Bad Request", format!(r#"{{"error":"{err}"}}"#)),
+        Err(e) => err(400, "Bad Request", &e.to_string()),
     }
 }
 
@@ -257,17 +243,13 @@ pub(crate) fn handle_crm_event(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return err_500();
+        return err(500, "Internal Server Error", "state_lock_poisoned");
     };
     if guard.authenticate(req).is_none() {
-        return err_401();
+        return err(401, "Unauthorized", "unauthorized");
     }
     let Some(provider) = CrmProvider::parse(provider_slug) else {
-        return (
-            400,
-            "Bad Request",
-            r#"{"error":"unsupported_crm_provider"}"#.to_string(),
-        );
+        return err(400, "Bad Request", "unsupported_crm_provider");
     };
     let conv_id = json_str(&req.body, "conversation_id").unwrap_or_default();
     let text = json_str(&req.body, "text").unwrap_or_default();
@@ -280,6 +262,6 @@ pub(crate) fn handle_crm_event(
                 ev.provider, ev.conversation_id
             ),
         ),
-        Err(err) => (400, "Bad Request", format!(r#"{{"error":"{err}"}}"#)),
+        Err(e) => err(400, "Bad Request", &e.to_string()),
     }
 }

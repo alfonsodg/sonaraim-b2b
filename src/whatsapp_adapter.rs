@@ -40,6 +40,20 @@ pub struct SonaraimCardDraft {
     pub category: MessageCategory,
 }
 
+impl SonaraimCardDraft {
+    /// Formats the card draft as a JSON payload string.
+    pub fn to_json(&self) -> String {
+        let cat = match self.category {
+            MessageCategory::Transactional => "TRANSACTIONAL",
+            MessageCategory::Promotional => "PROMOTIONAL",
+        };
+        format!(
+            r#"{{"recipient":"{}","title":"{}","body":"{}","category":"{cat}"}}"#,
+            self.recipient, self.title, self.body
+        )
+    }
+}
+
 /// Errors returned when translating a legacy WhatsApp Cloud API request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError {

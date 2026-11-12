@@ -229,3 +229,65 @@ fn relay_forwarding_encodes_real_message_card_json_in_payload_hex() {
 
     drop(b2b_handle);
 }
+
+#[test]
+fn whatsapp_compat_normalizes_e164_and_relays_to_node() {
+    let node_listener = TcpListener::bind("127.0.0.1:0").expect("bind mock node");
+    let node_addr = node_listener.local_addr().expect("node addr").to_string();
+    let node_handle = thread::spawn(move || {
+        let (mut stream, _) = node_listener.accept().expect("accept node relay");
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).expect("read relay req");
+        let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+        let reply =
+            "HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
+        stream
+            .write_all(reply.as_bytes())
+            .expect("write relay resp");
+        req_str
+    });
+
+    let mut cfg = sample_config(11);
+    cfg.node_rpc_url = format!("http://{node_addr}");
+    let mut state = B2bState::new(cfg);
+    state.register_tenant(
+        "did:web:clinic.example.com",
+        "sk_clinic_1",
+        SaasPlanTier::SmbPro,
+        10,
+    );
+    let (b2b_addr, b2b_handle) = start_test_server(state).expect("start b2b");
+
+    let wa_payload = r#"{"to":"+51999888777","template":"dental_reminder","params":["10:00 AM"]}"#;
+    let (st, resp) = send_http(
+        &b2b_addr,
+        "POST",
+        "/v1/whatsapp-compat/555123/messages",
+        &[("Authorization", "Bearer sk_clinic_1")],
+        wa_payload,
+    );
+    assert_eq!(st, 200);
+    assert!(resp.contains("\"relayed\":true"));
+    assert!(resp.contains("\"recipient\":\"did:sonaraim:+51999888777\""));
+
+    let raw_req = node_handle.join().expect("join mock node");
+    let (_, req_body) = raw_req.split_once("\r\n\r\n").unwrap_or(("", ""));
+    assert_eq!(
+        json_str(req_body, "recipient_did"),
+        Some("did:sonaraim:+51999888777".to_string())
+    );
+    assert_eq!(
+        json_str(req_body, "recipient_mailbox_id"),
+        Some("did:sonaraim:+51999888777".to_string())
+    );
+    assert_eq!(
+        json_str(req_body, "tenant_did"),
+        Some("did:web:clinic.example.com".to_string())
+    );
+
+    let payload_hex = json_str(req_body, "payload_hex").expect("payload_hex");
+    let expected_title_hex = encode_hex(b"dental_reminder");
+    assert!(payload_hex.contains(&expected_title_hex));
+
+    drop(b2b_handle);
+}
