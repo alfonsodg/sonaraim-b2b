@@ -276,7 +276,8 @@ fn handle_dispatch_message(
             node_rpc_url,
             recipient_did,
         } => {
-            let relayed = forward_to_node_relay(&node_rpc_url, &tenant_did, &recipient_did, seq);
+            let relayed =
+                forward_to_node_relay(&node_rpc_url, &tenant_did, &recipient_did, seq, &req.body);
             (
                 202,
                 "Accepted",

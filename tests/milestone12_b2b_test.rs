@@ -4,8 +4,10 @@
 use sonaraim_b2b::billing::SaasPlanTier;
 use sonaraim_b2b::config::B2bConfig;
 use sonaraim_b2b::http_api::{B2bState, start_test_server};
-use sonaraim_b2b::outbound_dispatcher::post_json_with_retry;
-use sonaraim_b2b::webhooks::{compute_webhook_signature, verify_timestamped_webhook};
+use sonaraim_b2b::outbound_dispatcher::{forward_to_node_relay, post_json_with_retry};
+use sonaraim_b2b::webhooks::{
+    compute_webhook_signature, encode_hex, json_str, verify_timestamped_webhook,
+};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -165,4 +167,65 @@ fn webhook_timestamp_replay_window_and_tenant_key_rotation_work() {
     assert_eq!(st_new, 202);
 
     drop(handle);
+}
+
+#[test]
+fn relay_forwarding_encodes_real_message_card_json_in_payload_hex() {
+    let node_listener = TcpListener::bind("127.0.0.1:0").expect("bind mock node");
+    let node_addr = node_listener.local_addr().expect("node addr").to_string();
+    let node_handle = thread::spawn(move || {
+        let (mut stream, _) = node_listener.accept().expect("accept node relay");
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).expect("read relay req");
+        let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+        let reply = "HTTP/1.1 202 Accepted\r\nContent-Length: 23\r\nConnection: close\r\n\r\n{\"wake_up_token\":\"wk2\"}";
+        stream
+            .write_all(reply.as_bytes())
+            .expect("write relay resp");
+        req_str
+    });
+
+    let mut cfg = sample_config(10);
+    cfg.node_rpc_url = format!("http://{node_addr}");
+    let mut state = B2bState::new(cfg);
+    state.register_tenant(
+        "did:web:bakery.example.com",
+        "sk_bakery_1",
+        SaasPlanTier::SmbPro,
+        5,
+    );
+    let (b2b_addr, b2b_handle) = start_test_server(state).expect("start b2b");
+
+    let msg_json = r#"{"recipient_did":"did:sonaraim:elena","category":"TRANSACTIONAL","onboarded":true,"title":"Order #881 Ready","action_label":"Confirm Pickup"}"#;
+    let (st, resp) = send_http(
+        &b2b_addr,
+        "POST",
+        "/v1/messages",
+        &[("Authorization", "Bearer sk_bakery_1")],
+        msg_json,
+    );
+    assert_eq!(st, 202);
+    assert!(resp.contains("\"relayed\":true"));
+
+    let raw_req = node_handle.join().expect("join node mock");
+    let (_, req_body) = raw_req.split_once("\r\n\r\n").unwrap_or(("", ""));
+    assert_eq!(
+        json_str(req_body, "tenant_did"),
+        Some("did:web:bakery.example.com".to_string())
+    );
+    let payload_hex = json_str(req_body, "payload_hex").expect("payload_hex field");
+    assert_ne!(payload_hex, "736f6e617261696d5f623262");
+    let expected_sub = encode_hex(b"Order #881 Ready");
+    assert!(payload_hex.contains(&expected_sub));
+
+    // Also test direct 5-arg forward_to_node_relay call against offline port returns false cleanly
+    assert!(!forward_to_node_relay(
+        "http://127.0.0.1:9",
+        "did:web:bakery.example.com",
+        "did:sonaraim:elena",
+        1,
+        msg_json
+    ));
+
+    drop(b2b_handle);
 }

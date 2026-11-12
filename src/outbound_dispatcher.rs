@@ -132,6 +132,7 @@ pub fn forward_to_node_relay(
     tenant_did: &str,
     recipient_did: &str,
     seq: u64,
+    raw_message_json: &str,
 ) -> bool {
     let url = format!("{}/v1/relay/envelopes", node_rpc_url.trim_end_matches('/'));
     let now_nanos = SystemTime::now()
@@ -139,8 +140,14 @@ pub fn forward_to_node_relay(
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let env_id = format!("env_b2b_{seq}_{now_nanos}");
+    let raw = if raw_message_json.trim().is_empty() {
+        "{}"
+    } else {
+        raw_message_json.trim()
+    };
+    let payload_hex = crate::webhooks::encode_hex(raw.as_bytes());
     let payload = format!(
-        r#"{{"envelope_id":"{env_id}","recipient_mailbox_id":"{recipient_did}","recipient_did":"{recipient_did}","tenant_did":"{tenant_did}","payload_hex":"736f6e617261696d5f623262"}}"#
+        r#"{{"envelope_id":"{env_id}","recipient_mailbox_id":"{recipient_did}","recipient_did":"{recipient_did}","tenant_did":"{tenant_did}","payload_hex":"{payload_hex}"}}"#
     );
     matches!(
         post_json_with_timeout(&url, &[], &payload, configured_timeout_ms()),
