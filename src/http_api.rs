@@ -13,7 +13,9 @@ use crate::routes::{
     handle_card_action, handle_crm_event, handle_payment_intent, handle_revoke_consent,
     handle_tenant_analytics, handle_tenant_subscription, handle_whatsapp_compat,
 };
-use crate::webhooks::{HttpRequest, json_bool, json_str, read_http_request, write_json_response};
+use crate::webhooks::{
+    HttpRequest, json_bool, json_str, read_http_request, write_http_response, write_json_response,
+};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{TcpListener, TcpStream};
@@ -162,7 +164,17 @@ fn handle_connection(mut stream: TcpStream, shared: Arc<Mutex<B2bState>>) {
         return;
     };
     let (status, reason, body) = route_request(&req, &shared);
-    write_json_response(&mut stream, status, reason, &body);
+    if req.method == "GET" && req.path == "/metrics" {
+        write_http_response(
+            &mut stream,
+            status,
+            reason,
+            "text/plain; version=0.0.4; charset=utf-8",
+            &body,
+        );
+    } else {
+        write_json_response(&mut stream, status, reason, &body);
+    }
 }
 
 fn route_request(req: &HttpRequest, shared: &Arc<Mutex<B2bState>>) -> (u16, &'static str, String) {

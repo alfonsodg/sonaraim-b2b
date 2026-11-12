@@ -69,13 +69,25 @@ pub fn read_http_request(stream: &mut TcpStream) -> Option<HttpRequest> {
 }
 
 /// Writes an HTTP/1.1 JSON response to a [`TcpStream`].
-pub fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, json_body: &str) {
+/// Writes an HTTP/1.1 response with an explicit `Content-Type` header.
+pub fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &str,
+) {
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
-        json_body.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+}
+
+/// Writes an HTTP/1.1 JSON response and flushes the stream.
+pub fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, json_body: &str) {
+    write_http_response(stream, status, reason, "application/json", json_body);
 }
 
 /// Extracts a string value for `key` from a flat or simple JSON object.

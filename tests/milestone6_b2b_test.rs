@@ -306,5 +306,13 @@ fn ai_agent_stream_listener_and_prometheus_metrics_endpoint_work() {
     assert!(metrics_body.contains("sonaraim_b2b_messages_sent_total 1"));
     assert!(metrics_body.contains("sonaraim_b2b_card_actions_total 0"));
 
+    let mut raw = TcpStream::connect(&http_addr).expect("connect metrics");
+    raw.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write raw metrics req");
+    let mut raw_resp = String::new();
+    raw.read_to_string(&mut raw_resp)
+        .expect("read raw metrics resp");
+    assert!(raw_resp.contains("Content-Type: text/plain; version=0.0.4; charset=utf-8"));
+
     drop(http_handle);
 }
