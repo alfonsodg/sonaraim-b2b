@@ -10,6 +10,7 @@ pub mod consent;
 pub mod crm_connectors;
 pub mod fallback;
 pub mod http_api;
+pub mod persistence;
 pub mod routes;
 pub mod webhooks;
 pub mod whatsapp_adapter;

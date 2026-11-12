@@ -189,6 +189,7 @@ pub(crate) fn handle_revoke_consent(
     guard
         .revoked_consents
         .insert(format!("{tenant_did}|{user_did}"));
+    crate::persistence::persist_if_configured(&guard);
     (200, "OK", r#"{"status":"revoked"}"#.to_string())
 }
 

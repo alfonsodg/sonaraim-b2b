@@ -5,7 +5,7 @@ use sonaraim_b2b::http_api::{B2bState, run_server};
 use std::process;
 
 /// Loads runtime configuration from environment variables, logs structured JSON status,
-/// and starts the Enterprise B2B HTTP API server.
+/// restores durable state if configured, and starts the Enterprise B2B HTTP API server.
 fn main() {
     match B2bConfig::from_env() {
         Ok(cfg) => {
@@ -19,6 +19,9 @@ fn main() {
                 cfg.promo_rate_limit_rps
             );
             let mut state = B2bState::new(cfg);
+            let storage_path = std::env::var("B2B_STORAGE_PATH")
+                .unwrap_or_else(|_| "/tmp/sonaraim-b2b-state.jsonl".to_string());
+            state.set_storage_path(&storage_path);
             state.register_bootstrap_tenant(
                 std::env::var("B2B_BOOTSTRAP_TENANT_DID").ok().as_deref(),
                 std::env::var("B2B_BOOTSTRAP_API_KEY").ok().as_deref(),

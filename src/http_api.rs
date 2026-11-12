@@ -3,8 +3,9 @@
 
 use crate::billing::SaasPlanTier;
 use crate::config::B2bConfig;
-use crate::consent::{ConsentError, ConsentGate, ConsentToken, MessageCategory};
+use crate::consent::MessageCategory;
 use crate::fallback::{DeliveryRoute, SmartFallbackEngine};
+use crate::persistence::{authorize_promo, handle_register_tenant, persist_if_configured};
 use crate::routes::{
     handle_card_action, handle_crm_event, handle_payment_intent, handle_revoke_consent,
     handle_tenant_analytics, handle_tenant_subscription, handle_whatsapp_compat,
@@ -40,9 +41,18 @@ pub struct TenantRecord {
 pub struct B2bState {
     /// Zero-hardcode runtime configuration.
     pub config: B2bConfig,
-    pub(crate) tenants: HashMap<String, TenantRecord>,
-    pub(crate) api_keys: HashMap<String, String>,
-    pub(crate) revoked_consents: HashSet<String>,
+    /// Registered enterprise tenants indexed by DID.
+    pub tenants: HashMap<String, TenantRecord>,
+    /// Bearer API key lookup table mapping key -> tenant DID.
+    pub api_keys: HashMap<String, String>,
+    /// Revoked `(tenant_did|recipient_did)` consent entries.
+    pub revoked_consents: HashSet<String>,
+    /// Optional file path for durable JSONL state snapshots.
+    pub storage_path: Option<String>,
+    /// Optional admin master key for `POST /v1/tenants` provisioning.
+    pub admin_key: Option<String>,
+    /// Optional Redis URL for distributed promotional rate limiting.
+    pub redis_url: Option<String>,
 }
 
 impl B2bState {
@@ -53,7 +63,28 @@ impl B2bState {
             tenants: HashMap::new(),
             api_keys: HashMap::new(),
             revoked_consents: HashSet::new(),
+            storage_path: std::env::var("B2B_STORAGE_PATH").ok(),
+            admin_key: std::env::var("B2B_KMS_MASTER_KEY").ok(),
+            redis_url: std::env::var("REDIS_URL")
+                .ok()
+                .or_else(|| std::env::var("B2B_REDIS_URL").ok()),
         }
+    }
+
+    /// Configures the admin master key required by `POST /v1/tenants`.
+    pub fn set_admin_key(&mut self, key: &str) {
+        self.admin_key = Some(key.to_string());
+    }
+
+    /// Configures the durable JSONL snapshot path and loads any existing state.
+    pub fn set_storage_path(&mut self, path: &str) {
+        self.storage_path = Some(path.to_string());
+        let _ = crate::persistence::load_snapshot(self, path);
+    }
+
+    /// Configures the Redis connection URL for promotional rate limiting.
+    pub fn set_redis_url(&mut self, url: &str) {
+        self.redis_url = Some(url.to_string());
     }
 
     /// Registers an enterprise tenant with an API key, SaaS tier, and seat quota.
@@ -80,8 +111,7 @@ impl B2bState {
     /// Registers an optional bootstrap tenant from environment values when both are non-empty.
     pub fn register_bootstrap_tenant(&mut self, did: Option<&str>, api_key: Option<&str>) {
         if let (Some(d), Some(k)) = (did, api_key) {
-            let trimmed_did = d.trim();
-            let trimmed_key = k.trim();
+            let (trimmed_did, trimmed_key) = (d.trim(), k.trim());
             if !trimmed_did.is_empty() && !trimmed_key.is_empty() {
                 self.register_tenant(trimmed_did, trimmed_key, SaasPlanTier::SmbPro, 10);
             }
@@ -129,66 +159,44 @@ fn handle_connection(mut stream: TcpStream, shared: Arc<Mutex<B2bState>>) {
 }
 
 fn route_request(req: &HttpRequest, shared: &Arc<Mutex<B2bState>>) -> (u16, &'static str, String) {
-    if req.method == "GET" && req.path == "/health" {
-        return (
+    match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/health") => (
             200,
             "OK",
             r#"{"status":"ok","service":"sonaraim-b2b"}"#.to_string(),
-        );
+        ),
+        ("POST", "/v1/tenants") => handle_register_tenant(req, shared),
+        ("POST", "/v1/messages") => handle_dispatch_message(req, shared),
+        ("POST", "/v1/cards/actions") => handle_card_action(req, shared),
+        ("POST", "/v1/consents/revoke") => handle_revoke_consent(req, shared),
+        ("POST", "/v1/payments/intents") => handle_payment_intent(req, shared),
+        ("POST", p) if p.starts_with("/v1/whatsapp-compat/") && p.ends_with("/messages") => {
+            handle_whatsapp_compat(req, shared)
+        }
+        ("GET", p) if p.starts_with("/v1/tenants/") && p.ends_with("/analytics") => {
+            let did = p
+                .trim_start_matches("/v1/tenants/")
+                .trim_end_matches("/analytics");
+            handle_tenant_analytics(did, shared)
+        }
+        ("GET", p) if p.starts_with("/v1/tenants/") && p.ends_with("/subscription") => {
+            let did = p
+                .trim_start_matches("/v1/tenants/")
+                .trim_end_matches("/subscription");
+            handle_tenant_subscription(did, shared)
+        }
+        ("POST", p) if p.starts_with("/v1/integrations/crm/") && p.ends_with("/events") => {
+            let prov = p
+                .trim_start_matches("/v1/integrations/crm/")
+                .trim_end_matches("/events");
+            handle_crm_event(prov, req, shared)
+        }
+        _ => (
+            404,
+            "Not Found",
+            r#"{"error":"route_not_found"}"#.to_string(),
+        ),
     }
-    if req.method == "POST" && req.path == "/v1/messages" {
-        return handle_dispatch_message(req, shared);
-    }
-    if req.method == "POST"
-        && req.path.starts_with("/v1/whatsapp-compat/")
-        && req.path.ends_with("/messages")
-    {
-        return handle_whatsapp_compat(req, shared);
-    }
-    if req.method == "POST" && req.path == "/v1/cards/actions" {
-        return handle_card_action(req, shared);
-    }
-    if req.method == "GET"
-        && req.path.starts_with("/v1/tenants/")
-        && req.path.ends_with("/analytics")
-    {
-        let did = req
-            .path
-            .trim_start_matches("/v1/tenants/")
-            .trim_end_matches("/analytics");
-        return handle_tenant_analytics(did, shared);
-    }
-    if req.method == "GET"
-        && req.path.starts_with("/v1/tenants/")
-        && req.path.ends_with("/subscription")
-    {
-        let did = req
-            .path
-            .trim_start_matches("/v1/tenants/")
-            .trim_end_matches("/subscription");
-        return handle_tenant_subscription(did, shared);
-    }
-    if req.method == "POST" && req.path == "/v1/consents/revoke" {
-        return handle_revoke_consent(req, shared);
-    }
-    if req.method == "POST" && req.path == "/v1/payments/intents" {
-        return handle_payment_intent(req, shared);
-    }
-    if req.method == "POST"
-        && req.path.starts_with("/v1/integrations/crm/")
-        && req.path.ends_with("/events")
-    {
-        let provider = req
-            .path
-            .trim_start_matches("/v1/integrations/crm/")
-            .trim_end_matches("/events");
-        return handle_crm_event(provider, req, shared);
-    }
-    (
-        404,
-        "Not Found",
-        r#"{"error":"route_not_found"}"#.to_string(),
-    )
 }
 
 fn handle_dispatch_message(
@@ -223,49 +231,10 @@ fn handle_dispatch_message(
         "PROMOTIONAL" | "MARKETING" => MessageCategory::Promotional,
         _ => MessageCategory::Transactional,
     };
-    if category == MessageCategory::Promotional {
-        let limit = guard.config.promo_rate_limit_rps as u64;
-        if let Some(tenant) = guard.tenants.get_mut(&tenant_did) {
-            tenant.promo_requests += 1;
-            if tenant.promo_requests > limit {
-                return (
-                    429,
-                    "Too Many Requests",
-                    r#"{"error":"promo_rate_limit_exceeded"}"#.to_string(),
-                );
-            }
-        }
-        let consent_key = format!("{tenant_did}|{recipient}");
-        let is_revoked = guard.revoked_consents.contains(&consent_key);
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let token = consent_sig.map(|sig| ConsentToken {
-            token_id: format!("tok_{recipient}"),
-            tenant_did: tenant_did.clone(),
-            recipient_did: recipient.clone(),
-            expires_at_unix: now_unix.saturating_add(3600),
-            revoked: is_revoked,
-            signature: sig,
-        });
-        if let Err(err) = ConsentGate::authorize_dispatch(
-            &tenant_did,
-            true,
-            &recipient,
-            category,
-            token.as_ref(),
-            now_unix,
-        ) {
-            let code = match err {
-                ConsentError::MissingConsentToken => "missing_consent_token",
-                ConsentError::RevokedConsentToken(_) => "consent_revoked",
-                ConsentError::ExpiredConsentToken { .. } => "consent_expired",
-                ConsentError::InvalidConsentScope(_) => "consent_scope_invalid",
-                ConsentError::UnverifiedTenantDid(_) => "unverified_tenant_did",
-            };
-            return (403, "Forbidden", format!(r#"{{"error":"{code}"}}"#));
-        }
+    if category == MessageCategory::Promotional
+        && let Some(err_resp) = authorize_promo(&mut guard, &tenant_did, &recipient, consent_sig)
+    {
+        return err_resp;
     }
 
     let engine = SmartFallbackEngine::new(
@@ -283,6 +252,7 @@ fn handle_dispatch_message(
     if let Some(tenant) = guard.tenants.get_mut(&tenant_did) {
         tenant.messages_sent += 1;
     }
+    persist_if_configured(&guard);
     match route {
         DeliveryRoute::NativeMlsE2ee { .. } => (
             202,
