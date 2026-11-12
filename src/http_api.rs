@@ -77,6 +77,17 @@ impl B2bState {
         self.tenants.insert(did.to_string(), record);
     }
 
+    /// Registers an optional bootstrap tenant from environment values when both are non-empty.
+    pub fn register_bootstrap_tenant(&mut self, did: Option<&str>, api_key: Option<&str>) {
+        if let (Some(d), Some(k)) = (did, api_key) {
+            let trimmed_did = d.trim();
+            let trimmed_key = k.trim();
+            if !trimmed_did.is_empty() && !trimmed_key.is_empty() {
+                self.register_tenant(trimmed_did, trimmed_key, SaasPlanTier::SmbPro, 10);
+            }
+        }
+    }
+
     pub(crate) fn authenticate(&self, req: &HttpRequest) -> Option<String> {
         let auth = req.headers.get("authorization")?;
         let token = auth.strip_prefix("Bearer ").unwrap_or(auth).trim();

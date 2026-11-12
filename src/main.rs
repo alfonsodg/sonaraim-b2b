@@ -18,7 +18,12 @@ fn main() {
                 cfg.instant_clip_base_url,
                 cfg.promo_rate_limit_rps
             );
-            if let Err(err) = run_server(B2bState::new(cfg)) {
+            let mut state = B2bState::new(cfg);
+            state.register_bootstrap_tenant(
+                std::env::var("B2B_BOOTSTRAP_TENANT_DID").ok().as_deref(),
+                std::env::var("B2B_BOOTSTRAP_API_KEY").ok().as_deref(),
+            );
+            if let Err(err) = run_server(state) {
                 eprintln!(
                     "{{\"level\":\"ERROR\",\"service\":\"sonaraim-b2b\",\"error\":\"{err}\"}}"
                 );

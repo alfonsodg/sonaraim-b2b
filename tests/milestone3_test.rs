@@ -191,5 +191,19 @@ fn crm_connectors_and_payment_take_rate_and_subscriptions_work() {
     assert_eq!(st, 200);
     assert!(crm_resp.contains("zendesk"));
 
+    let mut boot_state = B2bState::new(sample_config(10));
+    boot_state.register_bootstrap_tenant(Some("did:web:boot.example.com"), Some("sk_boot_1"));
+    let (boot_addr, boot_handle) = start_test_server(boot_state).expect("start boot server");
+    let (st, boot_sub) = send_http(
+        &boot_addr,
+        "GET",
+        "/v1/tenants/did:web:boot.example.com/subscription",
+        &[],
+        "",
+    );
+    assert_eq!(st, 200);
+    assert!(boot_sub.contains("did:web:boot.example.com"));
+    drop(boot_handle);
+
     drop(handle);
 }
