@@ -1,0 +1,8 @@
+[package]
+name = "sonaraim-b2b"
+version = "0.1.0"
+edition = "2024"
+description = "Sonaraim Enterprise E2EE Bridge, WhatsApp Cloud API Adapter, Consent Gate, and Smart Fallback Engine"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

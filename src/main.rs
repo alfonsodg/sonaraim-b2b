@@ -1,0 +1,28 @@
+//! Entrypoint for the `sonaraim-b2b` Enterprise Bridge binary.
+
+use sonaraim_b2b::config::B2bConfig;
+use std::process;
+
+/// Loads runtime configuration from environment variables and logs structured JSON status.
+fn main() {
+    match B2bConfig::from_env() {
+        Ok(cfg) => {
+            println!(
+                "{{\"level\":\"INFO\",\"service\":\"sonaraim-b2b\",\"status\":\"ready\",\"http_host\":\"{}\",\"http_port\":{},\"grpc_port\":{},\"node_rpc_url\":\"{}\",\"instant_clip_base_url\":\"{}\",\"promo_rate_limit_rps\":{}}}",
+                cfg.http_host,
+                cfg.http_port,
+                cfg.grpc_port,
+                cfg.node_rpc_url,
+                cfg.instant_clip_base_url,
+                cfg.promo_rate_limit_rps
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "{{\"level\":\"ERROR\",\"service\":\"sonaraim-b2b\",\"error\":\"{}\"}}",
+                err
+            );
+            process::exit(1);
+        }
+    }
+}
