@@ -1,5 +1,5 @@
-//! Outbound HTTP/1.1 JSON webhook dispatcher, `sonaraim-node` MLS relay forwarder,
-//! and toll-free AI Agent stream TCP listener on `B2B_GRPC_PORT`.
+//! Outbound HTTP/1.1 JSON webhook dispatcher, retry backoff client, `sonaraim-node`
+//! MLS relay forwarder, and toll-free AI Agent stream TCP listener on `B2B_GRPC_PORT`.
 
 use crate::http_api::B2bState;
 use crate::webhooks::json_str;
@@ -80,6 +80,43 @@ pub fn post_json_with_timeout(
         .ok_or_else(|| "invalid HTTP status line".to_string())
 }
 
+/// Sends an outbound HTTP/1.1 `POST` request with automatic retry backoff on socket errors or 5xx responses.
+pub fn post_json_with_retry(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    timeout_ms: u64,
+    max_retries: u32,
+) -> Result<u16, String> {
+    let mut last_err = String::from("unattempted");
+    for attempt in 0..=max_retries {
+        match post_json_with_timeout(url, headers, body, timeout_ms) {
+            Ok(status) if status < 500 => return Ok(status),
+            Ok(status) => last_err = format!("upstream 5xx status: {status}"),
+            Err(err) => last_err = err,
+        }
+        if attempt < max_retries {
+            thread::sleep(Duration::from_millis(15 * u64::from(attempt + 1)));
+        }
+    }
+    Err(last_err)
+}
+
+/// Dispatches a JSON payload to an optional upstream URL or fallback environment variable with retries.
+pub fn sync_optional_upstream(explicit_url: Option<String>, env_var: &str, payload: &str) -> bool {
+    let target = explicit_url
+        .or_else(|| std::env::var(env_var).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(url) = target else {
+        return false;
+    };
+    matches!(
+        post_json_with_retry(&url, &[], payload, configured_timeout_ms(), 2),
+        Ok(st) if (200..300).contains(&st)
+    )
+}
+
 /// Returns the configured outbound webhook/relay timeout in milliseconds (`B2B_WEBHOOK_TIMEOUT_MS`).
 pub fn configured_timeout_ms() -> u64 {
     std::env::var("B2B_WEBHOOK_TIMEOUT_MS")
@@ -112,9 +149,6 @@ pub fn forward_to_node_relay(
 }
 
 /// Starts the toll-free AI Agent stream listener on `host:grpc_port`.
-///
-/// Accepts line-delimited JSON or gRPC-framed AI agent stream requests and responds
-/// with structured Sonaraim Card token frames (`stream: "sonaraim.ai.v1"`).
 pub fn start_ai_stream_listener(
     host: &str,
     grpc_port: u16,

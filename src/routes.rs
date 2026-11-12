@@ -4,11 +4,30 @@
 use crate::billing::{PaymentProvider, compute_take_rate_minor_units};
 use crate::crm_connectors::{CrmProvider, normalize_crm_event};
 use crate::http_api::B2bState;
+use crate::outbound_dispatcher::{
+    configured_timeout_ms, post_json_with_retry, sync_optional_upstream,
+};
 use crate::webhooks::{
     HttpRequest, compute_webhook_signature, json_str, json_u64, verify_webhook_signature,
 };
 use crate::whatsapp_adapter::{WhatsAppCloudAdapter, WhatsAppTemplateRequest};
 use std::sync::{Arc, Mutex};
+
+fn err_500() -> (u16, &'static str, String) {
+    (
+        500,
+        "Internal Server Error",
+        r#"{"error":"state_lock_poisoned"}"#.to_string(),
+    )
+}
+
+fn err_401() -> (u16, &'static str, String) {
+    (
+        401,
+        "Unauthorized",
+        r#"{"error":"unauthorized"}"#.to_string(),
+    )
+}
 
 /// Translates a legacy WhatsApp Cloud API payload into a declarative Sonaraim Card.
 pub(crate) fn handle_whatsapp_compat(
@@ -16,24 +35,18 @@ pub(crate) fn handle_whatsapp_compat(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return (
-            500,
-            "Internal Server Error",
-            r#"{"error":"state_lock_poisoned"}"#.to_string(),
-        );
+        return err_500();
     };
     if guard.authenticate(req).is_none() {
-        return (
-            401,
-            "Unauthorized",
-            r#"{"error":"unauthorized"}"#.to_string(),
-        );
+        return err_401();
     }
+    drop(guard);
     let wa_req = WhatsAppTemplateRequest {
         messaging_product: json_str(&req.body, "messaging_product")
             .unwrap_or_else(|| "whatsapp".to_string()),
         to: json_str(&req.body, "to").unwrap_or_default(),
         template_name: json_str(&req.body, "template_name")
+            .or_else(|| json_str(&req.body, "template"))
             .unwrap_or_else(|| "default_template".to_string()),
         language_code: json_str(&req.body, "language_code").unwrap_or_else(|| "en_US".to_string()),
         category: json_str(&req.body, "category").unwrap_or_else(|| "UTILITY".to_string()),
@@ -41,14 +54,21 @@ pub(crate) fn handle_whatsapp_compat(
         buttons: vec![],
     };
     match WhatsAppCloudAdapter::translate(&wa_req) {
-        Ok(card) => (
-            200,
-            "OK",
-            format!(
-                r#"{{"format":"SONARAIM_CARD","recipient":"{}","title":"{}"}}"#,
-                card.recipient, card.title
-            ),
-        ),
+        Ok(card) => {
+            let synced = sync_optional_upstream(
+                json_str(&req.body, "upstream_url"),
+                "B2B_WHATSAPP_UPSTREAM_URL",
+                &req.body,
+            );
+            (
+                200,
+                "OK",
+                format!(
+                    r#"{{"messaging_product":"sonaraim","format":"SONARAIM_CARD","recipient":"{}","title":"{}","upstream_synced":{synced}}}"#,
+                    card.recipient, card.title
+                ),
+            )
+        }
         Err(err) => (400, "Bad Request", format!(r#"{{"error":"{err}"}}"#)),
     }
 }
@@ -59,18 +79,10 @@ pub(crate) fn handle_card_action(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(mut guard) = shared.lock() else {
-        return (
-            500,
-            "Internal Server Error",
-            r#"{"error":"state_lock_poisoned"}"#.to_string(),
-        );
+        return err_500();
     };
     let Some(auth_tenant) = guard.authenticate(req) else {
-        return (
-            401,
-            "Unauthorized",
-            r#"{"error":"unauthorized"}"#.to_string(),
-        );
+        return err_401();
     };
     let header_sig = req
         .headers
@@ -89,17 +101,19 @@ pub(crate) fn handle_card_action(
     if let Some(tenant) = guard.tenants.get_mut(&tenant_did) {
         tenant.card_actions += 1;
     }
+    crate::persistence::persist_if_configured(&guard);
+    drop(guard);
     let webhook_sig = compute_webhook_signature(&req.body);
     let delivered = json_str(&req.body, "callback_url")
         .filter(|u| !u.trim().is_empty())
         .is_some_and(|url| {
-            let timeout = crate::outbound_dispatcher::configured_timeout_ms();
             matches!(
-                crate::outbound_dispatcher::post_json_with_timeout(
+                post_json_with_retry(
                     &url,
                     &[("X-Sonaraim-Signature", &webhook_sig)],
                     &req.body,
-                    timeout
+                    configured_timeout_ms(),
+                    2,
                 ),
                 Ok(st) if (200..300).contains(&st)
             )
@@ -119,11 +133,7 @@ pub(crate) fn handle_tenant_analytics(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return (
-            500,
-            "Internal Server Error",
-            r#"{"error":"state_lock_poisoned"}"#.to_string(),
-        );
+        return err_500();
     };
     match guard.tenants.get(did) {
         Some(t) => (
@@ -148,11 +158,7 @@ pub(crate) fn handle_tenant_subscription(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return (
-            500,
-            "Internal Server Error",
-            r#"{"error":"state_lock_poisoned"}"#.to_string(),
-        );
+        return err_500();
     };
     match guard.tenants.get(did) {
         Some(t) => (
@@ -179,18 +185,10 @@ pub(crate) fn handle_revoke_consent(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(mut guard) = shared.lock() else {
-        return (
-            500,
-            "Internal Server Error",
-            r#"{"error":"state_lock_poisoned"}"#.to_string(),
-        );
+        return err_500();
     };
     let Some(tenant_did) = guard.authenticate(req) else {
-        return (
-            401,
-            "Unauthorized",
-            r#"{"error":"unauthorized"}"#.to_string(),
-        );
+        return err_401();
     };
     let user_did = json_str(&req.body, "user_did").unwrap_or_default();
     if user_did.trim().is_empty() {
@@ -213,19 +211,12 @@ pub(crate) fn handle_payment_intent(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return (
-            500,
-            "Internal Server Error",
-            r#"{"error":"state_lock_poisoned"}"#.to_string(),
-        );
+        return err_500();
     };
     if guard.authenticate(req).is_none() {
-        return (
-            401,
-            "Unauthorized",
-            r#"{"error":"unauthorized"}"#.to_string(),
-        );
+        return err_401();
     }
+    drop(guard);
     let provider_str = json_str(&req.body, "provider").unwrap_or_default();
     let Some(provider) = PaymentProvider::parse(&provider_str) else {
         return (
@@ -237,17 +228,24 @@ pub(crate) fn handle_payment_intent(
     let amount = json_u64(&req.body, "amount_minor").unwrap_or(0);
     let bps = json_u64(&req.body, "take_rate_bps").unwrap_or(50);
     match compute_take_rate_minor_units(amount, bps) {
-        Ok((fee, net)) => (
-            201,
-            "Created",
-            format!(
-                r#"{{"provider":"{}","amount_minor":{},"take_rate_fee_minor":{},"net_minor":{}}}"#,
-                provider.as_str(),
-                amount,
-                fee,
-                net
-            ),
-        ),
+        Ok((fee, net)) => {
+            let synced = sync_optional_upstream(
+                json_str(&req.body, "upstream_url"),
+                "B2B_PSP_UPSTREAM_URL",
+                &req.body,
+            );
+            (
+                201,
+                "Created",
+                format!(
+                    r#"{{"provider":"{}","amount_minor":{},"take_rate_fee_minor":{},"net_minor":{},"upstream_synced":{synced}}}"#,
+                    provider.as_str(),
+                    amount,
+                    fee,
+                    net
+                ),
+            )
+        }
         Err(err) => (400, "Bad Request", format!(r#"{{"error":"{err}"}}"#)),
     }
 }
@@ -259,18 +257,10 @@ pub(crate) fn handle_crm_event(
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
-        return (
-            500,
-            "Internal Server Error",
-            r#"{"error":"state_lock_poisoned"}"#.to_string(),
-        );
+        return err_500();
     };
     if guard.authenticate(req).is_none() {
-        return (
-            401,
-            "Unauthorized",
-            r#"{"error":"unauthorized"}"#.to_string(),
-        );
+        return err_401();
     }
     let Some(provider) = CrmProvider::parse(provider_slug) else {
         return (
