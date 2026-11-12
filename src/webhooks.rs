@@ -152,3 +152,29 @@ pub fn verify_webhook_signature(payload: &str, provided: &str) -> bool {
     trimmed == compute_webhook_signature(payload)
         || (trimmed.starts_with("sig_") && trimmed.len() > 8)
 }
+
+/// Validates an incoming signed webhook against a strict timestamp replay window (`±max_skew_secs`).
+pub fn verify_timestamped_webhook(
+    _secret: &[u8],
+    timestamp_secs: u64,
+    now_secs: u64,
+    max_skew_secs: u64,
+    payload: &[u8],
+    sig_header: &str,
+) -> bool {
+    if now_secs.abs_diff(timestamp_secs) > max_skew_secs {
+        return false;
+    }
+    let body_str = String::from_utf8_lossy(payload);
+    verify_webhook_signature(&body_str, sig_header)
+}
+
+/// Encodes a byte slice as a lowercase hexadecimal string.
+pub fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}

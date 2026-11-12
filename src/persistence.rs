@@ -240,3 +240,47 @@ pub fn handle_metrics(shared: &Arc<Mutex<B2bState>>) -> (u16, &'static str, Stri
     );
     (200, "OK", body)
 }
+
+/// Handles `POST /v1/tenants/rotate-key` to atomically rotate a tenant's Bearer API key.
+pub fn handle_rotate_tenant_key(
+    req: &HttpRequest,
+    shared: &Arc<Mutex<B2bState>>,
+) -> (u16, &'static str, String) {
+    let Ok(mut guard) = shared.lock() else {
+        return (
+            500,
+            "Internal Server Error",
+            r#"{"error":"state_lock_poisoned"}"#.to_string(),
+        );
+    };
+    let Some(tenant_did) = guard.authenticate(req) else {
+        return (
+            401,
+            "Unauthorized",
+            r#"{"error":"unauthorized"}"#.to_string(),
+        );
+    };
+    let new_key = json_str(&req.body, "new_api_key").unwrap_or_default();
+    if new_key.trim().is_empty() {
+        return (
+            400,
+            "Bad Request",
+            r#"{"error":"missing_new_api_key"}"#.to_string(),
+        );
+    }
+    let trimmed_new = new_key.trim().to_string();
+    let old_key = guard
+        .tenants
+        .get_mut(&tenant_did)
+        .map(|tenant| std::mem::replace(&mut tenant.api_key, trimmed_new.clone()));
+    if let Some(old) = old_key {
+        guard.api_keys.remove(&old);
+    }
+    guard.api_keys.insert(trimmed_new, tenant_did.clone());
+    persist_if_configured(&guard);
+    (
+        200,
+        "OK",
+        format!(r#"{{"status":"rotated","tenant_did":"{tenant_did}"}}"#),
+    )
+}

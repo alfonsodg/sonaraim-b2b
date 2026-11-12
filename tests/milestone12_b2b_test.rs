@@ -5,6 +5,7 @@ use sonaraim_b2b::billing::SaasPlanTier;
 use sonaraim_b2b::config::B2bConfig;
 use sonaraim_b2b::http_api::{B2bState, start_test_server};
 use sonaraim_b2b::outbound_dispatcher::post_json_with_retry;
+use sonaraim_b2b::webhooks::{compute_webhook_signature, verify_timestamped_webhook};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -98,4 +99,70 @@ fn outbound_retry_backoff_and_upstream_whatsapp_psp_forwarding_work() {
     let total_attempts = upstream_handle.join().expect("join upstream");
     assert_eq!(total_attempts, 3);
     drop(b2b_handle);
+}
+
+#[test]
+fn webhook_timestamp_replay_window_and_tenant_key_rotation_work() {
+    let payload = r#"{"card_id":"c-99","action_id":"approve"}"#;
+    let sig = compute_webhook_signature(payload);
+    // Fresh timestamp within 300s window passes
+    assert!(verify_timestamped_webhook(
+        b"sec",
+        1_700_000_100,
+        1_700_000_200,
+        300,
+        payload.as_bytes(),
+        &sig
+    ));
+    // Stale timestamp outside 300s window is rejected
+    assert!(!verify_timestamped_webhook(
+        b"sec",
+        1_700_000_000,
+        1_700_000_600,
+        300,
+        payload.as_bytes(),
+        &sig
+    ));
+
+    let mut state = B2bState::new(sample_config(10));
+    state.register_tenant(
+        "did:web:rotate.example.com",
+        "sk_old_key_1",
+        SaasPlanTier::EnterpriseSovereign,
+        20,
+    );
+    let (addr, handle) = start_test_server(state).expect("start server");
+
+    // Rotate key using current Bearer token
+    let (st, rot_resp) = send_http(
+        &addr,
+        "POST",
+        "/v1/tenants/rotate-key",
+        &[("Authorization", "Bearer sk_old_key_1")],
+        r#"{"new_api_key":"sk_new_key_2"}"#,
+    );
+    assert_eq!(st, 200);
+    assert!(rot_resp.contains("\"status\":\"rotated\""));
+
+    // Old key is immediately revoked -> 401
+    let (st_old, _) = send_http(
+        &addr,
+        "POST",
+        "/v1/messages",
+        &[("Authorization", "Bearer sk_old_key_1")],
+        r#"{"recipient_did":"did:sonaraim:alice","category":"TRANSACTIONAL","onboarded":false}"#,
+    );
+    assert_eq!(st_old, 401);
+
+    // New key succeeds -> 202
+    let (st_new, _) = send_http(
+        &addr,
+        "POST",
+        "/v1/messages",
+        &[("Authorization", "Bearer sk_new_key_2")],
+        r#"{"recipient_did":"did:sonaraim:alice","category":"TRANSACTIONAL","onboarded":false}"#,
+    );
+    assert_eq!(st_new, 202);
+
+    drop(handle);
 }

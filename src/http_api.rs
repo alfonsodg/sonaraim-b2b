@@ -7,7 +7,8 @@ use crate::consent::MessageCategory;
 use crate::fallback::{DeliveryRoute, SmartFallbackEngine};
 use crate::outbound_dispatcher::{forward_to_node_relay, start_ai_stream_listener};
 use crate::persistence::{
-    authorize_promo, handle_metrics, handle_register_tenant, persist_if_configured,
+    authorize_promo, handle_metrics, handle_register_tenant, handle_rotate_tenant_key,
+    persist_if_configured,
 };
 use crate::routes::{
     handle_card_action, handle_crm_event, handle_payment_intent, handle_revoke_consent,
@@ -139,12 +140,10 @@ pub fn start_test_server(state: B2bState) -> Result<(String, JoinHandle<()>), io
     Ok((addr, handle))
 }
 
-/// Starts the B2B HTTP server on the configured `B2B_HTTP_HOST:B2B_HTTP_PORT` and
-/// the AI Agent stream listener on `B2B_HTTP_HOST:B2B_GRPC_PORT`.
+/// Starts the B2B HTTP server on `B2B_HTTP_HOST:B2B_HTTP_PORT` and AI stream on `B2B_GRPC_PORT`.
 pub fn run_server(state: B2bState) -> Result<(), io::Error> {
     let addr = format!("{}:{}", state.config.http_host, state.config.http_port);
-    let grpc_host = state.config.http_host.clone();
-    let grpc_port = state.config.grpc_port;
+    let (grpc_host, grpc_port) = (state.config.http_host.clone(), state.config.grpc_port);
     let listener = TcpListener::bind(addr)?;
     let shared = Arc::new(Mutex::new(state));
     let _ = start_ai_stream_listener(&grpc_host, grpc_port, Arc::clone(&shared));
@@ -165,13 +164,8 @@ fn handle_connection(mut stream: TcpStream, shared: Arc<Mutex<B2bState>>) {
     };
     let (status, reason, body) = route_request(&req, &shared);
     if req.method == "GET" && req.path == "/metrics" {
-        write_http_response(
-            &mut stream,
-            status,
-            reason,
-            "text/plain; version=0.0.4; charset=utf-8",
-            &body,
-        );
+        let ct = "text/plain; version=0.0.4; charset=utf-8";
+        write_http_response(&mut stream, status, reason, ct, &body);
     } else {
         write_json_response(&mut stream, status, reason, &body);
     }
@@ -186,6 +180,7 @@ fn route_request(req: &HttpRequest, shared: &Arc<Mutex<B2bState>>) -> (u16, &'st
         ),
         ("GET", "/metrics") => handle_metrics(shared),
         ("POST", "/v1/tenants") => handle_register_tenant(req, shared),
+        ("POST", "/v1/tenants/rotate-key") => handle_rotate_tenant_key(req, shared),
         ("POST", "/v1/messages") => handle_dispatch_message(req, shared),
         ("POST", "/v1/cards/actions") => handle_card_action(req, shared),
         ("POST", "/v1/consents/revoke") => handle_revoke_consent(req, shared),
@@ -275,6 +270,7 @@ fn handle_dispatch_message(
         seq = tenant.messages_sent;
     }
     persist_if_configured(&guard);
+    drop(guard);
     match route {
         DeliveryRoute::NativeMlsE2ee {
             node_rpc_url,
