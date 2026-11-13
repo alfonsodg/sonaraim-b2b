@@ -4,7 +4,9 @@
 
 ## 1. Overview
 
-`sonaraim-b2b` provides an enterprise-grade gateway that bridges existing business messaging systems into the Sonaraim end-to-end encrypted network without compromising user privacy or requiring multi-month backend rewrites.
+`sonaraim-b2b` provides an enterprise-grade gateway bridging legacy business messaging systems into the Sonaraim end-to-end encrypted network without compromising user privacy, exposing plaintext metadata to relays, or charging arbitrary per-message fees.
+
+---
 
 ## 2. High-Level Data Flow (ASCII)
 
@@ -21,7 +23,7 @@
 |                                                                   |
 |  +---------------------------+     +---------------------------+  |
 |  |  1-Click WhatsApp Adapter |     |    Native B2B Dispatch    |  |
-|  |   (whatsapp_adapter.rs)   |     |         Endpoint          |  |
+|  |   (whatsapp_adapter.rs)   |     |       (routes.rs)         |  |
 |  +-------------+-------------+     +-------------+-------------+  |
 |                |                                 |                |
 |                +----------------+----------------+                |
@@ -58,27 +60,46 @@
         +--------------------+         +----------------------------+
 ```
 
-## 3. Component Responsibilities
+---
 
-### 3.1 Configuration Loader (`src/config.rs`)
+## 3. Subsystem Architecture
 
-Reads all runtime settings from environment variables (`B2B_HTTP_HOST`, `B2B_HTTP_PORT`, `B2B_GRPC_PORT`, `B2B_NODE_RPC_URL`, `B2B_INSTANT_CLIP_BASE_URL`, `B2B_PROMO_RATE_LIMIT_RPS`). Rejects missing or malformed values at startup.
+### 3.1 1-Click WhatsApp Cloud API Adapter (`src/whatsapp_adapter.rs`)
+
+Permits businesses to migrate from Meta's WhatsApp Cloud API with zero backend code rewrites:
+
+- **Template Parsing**: Parses WhatsApp Cloud API template requests (`name`, `language`, `components`, `parameters`).
+- **Card Translation**: Translates templates into native `SonaraimCardDraft` objects with corresponding actions and zero executable code.
+- **E.164 Normalization**: Normalizes telephone numbers into standard international format for routing.
 
 ### 3.2 Cryptographic Consent Gate (`src/consent.rs`)
 
-Prevents spam at the protocol boundary:
+Enforces user sovereignty and anti-spam controls at the enterprise boundary:
 
-- Verifies that the sender possesses a valid, verified `did:web:` identifier.
-- Permits `MessageCategory::Transactional` messages for verified tenants without requiring a promotional opt-in token.
-- Requires a non-expired, unrevoked `ConsentToken` matching both `tenant_did` and `recipient_did` for `MessageCategory::Promotional` messages.
+- **Category Separation**: Messages are categorized into `Transactional` (OTP, delivery alerts, invoices) and `Promotional` (marketing, offers).
+- **Consent Tokens**: Promotional messages require an active, unexpired `ConsentToken` cryptographically signed by the user's device.
+- **One-Tap Revocation**: When a user revokes consent, subsequent promotional attempts are rejected immediately with HTTP 403.
 
-### 3.3 WhatsApp Business Cloud API Adapter (`src/whatsapp_adapter.rs`)
+### 3.3 Smart Fallback Engine (`src/fallback.rs`)
 
-Accepts legacy `WhatsAppTemplateRequest` structures (mirroring Meta Graph API template payloads with body parameters and quick-reply/call-to-action buttons) and transforms them into deterministic `SonaraimCardDraft` envelopes.
+Solves the cold-start adoption barrier for enterprise communications:
 
-### 3.4 Smart Fallback Engine (`src/fallback.rs`)
+- **Onboarded Recipients**: Routes messages via native MLS 1.0 E2EE directly to `sonaraim-node`.
+- **Unregistered Recipients**: Generates a secure, signed Instant Web / App Clip link (`{B2B_INSTANT_CLIP_BASE_URL}/c/{clip_token}`). Tapping the link opens a native-speed web clip where the user interacts with the card and onboards with Passkeys.
 
-Evaluates recipient onboarding state:
+### 3.4 CRM Integration Connectors (`src/crm_connectors.rs`)
 
-- When the recipient is registered on Sonaraim, dispatches the encrypted envelope directly via `sonaraim-node` MLS delivery.
-- When the recipient is not yet registered, generates a zero-install Instant Web / App Clip link (`{B2B_INSTANT_CLIP_BASE_URL}/c/{ephemeral_token}`) so the recipient can complete the interactive card flow immediately in an isolated browser clip.
+Bridges multi-seat customer support platforms into E2EE channels:
+
+- **Supported Platforms**: Chatwoot, Zendesk, HubSpot, and Salesforce.
+- **Bi-Directional Sync**: Ingests agent replies from CRMs, formats them into signed cards, and dispatches customer actions back into CRM tickets.
+
+### 3.5 Outbound Webhook Dispatcher (`src/outbound_dispatcher.rs`, `src/webhooks.rs`)
+
+- **Signed Callbacks**: Outbound webhooks include timestamped Ed25519/HMAC signatures in `X-Sonaraim-Signature`.
+- **Retry with Exponential Backoff**: Transient network failures trigger structured retries with jittered backoff.
+
+### 3.6 Tenant Persistence & KMS Envelope Encryption (`src/persistence.rs`)
+
+- **Durable Snapshots**: Appends tenant state and message delivery receipts to a local JSONL log for crash recovery.
+- **KMS Master Key**: Master tenant credentials are sealed using `B2B_KMS_MASTER_KEY` envelope encryption.

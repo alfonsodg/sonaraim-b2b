@@ -1,29 +1,115 @@
-# Sonaraim B2B Enterprise Bridge
+# Sonaraim B2B Gateway (`sonaraim-b2b`)
 
-> Zero-Knowledge Enterprise E2EE Bridge, 1-Click WhatsApp Cloud API Adapter, Cryptographic Consent Gate, and Smart Fallback Engine
+> Enterprise E2EE Bridge, 1-Click WhatsApp Cloud API Adapter, Cryptographic Consent Gate, and Smart Fallback Engine.
 
-`sonaraim-b2b` enables verified enterprises (`did:web`) to migrate from high-cost, unencrypted legacy channels (WhatsApp Business Cloud API and SMS OTPs) to end-to-end encrypted, rich interactive `SonaraimCard` workflows with zero infrastructure lock-in.
+`sonaraim-b2b` connects modern enterprise business backends, CRMs, and AI agents directly to the decentralized Sonaraim messaging network without compromising user privacy, requiring complex client rewrites, or paying arbitrary per-message toll fees.
 
-## Core Capabilities
+---
 
-- **Zero-Hardcode Configuration (`config`)**: Loads all network bindings, node RPC endpoints, Instant Clip base URLs, and rate-limit thresholds strictly from environment variables.
-- **Cryptographic Consent Gate (`consent`)**: Enforces strict separation between `Transactional` and `Promotional` traffic. Verified `did:web` tenants can dispatch unlimited transactional notifications (OTPs, receipts, fraud alerts, flight updates), while promotional dispatches require an unrevoked, non-expired user `ConsentToken`.
-- **1-Click WhatsApp Business Cloud API Adapter (`whatsapp_adapter`)**: Translates legacy Meta Graph API `/v18.0/{phone-number-id}/messages` template payloads directly into native declarative `SonaraimCardDraft` envelopes without rewriting enterprise webhooks.
-- **Smart Fallback Engine (`fallback`)**: Routes payloads over native MLS E2EE when the recipient is registered on Sonaraim, or generates a signed Instant Web / App Clip magic link (`{B2B_INSTANT_CLIP_BASE_URL}/c/{token}`) when the recipient has not yet installed the client.
+## Key Capabilities
 
-## Architecture & Documentation
+- **Enterprise E2EE Termination Bridge (`src/http_api.rs`, `src/routes.rs`)**: Terminates organization MLS 1.0 sessions and bridges encrypted communications into clean REST/gRPC events for internal CRMs and bots.
+- **1-Click WhatsApp Cloud API Adapter (`src/whatsapp_adapter.rs`)**: Drop-in compatible endpoint accepting standard Meta WhatsApp Business Cloud API JSON payloads and translating them into native declarative cards.
+- **Cryptographic Consent Gate (`src/consent.rs`)**: Categorizes messages into Transactional (unlimited flat-rate) and Promotional (requiring unexpired user-signed `ConsentToken` opt-ins with instant revocation).
+- **Smart Fallback Engine (`src/fallback.rs`)**: Automatically routes non-onboarded recipients to Instant Web / App Clip magic links (`{B2B_INSTANT_CLIP_BASE_URL}/c/{token}`) for 100% day-one reachability.
+- **Dynamic Tenant Provisioning & Key Rotation (`src/persistence.rs`, `src/routes.rs`)**: Multi-tenant onboarding, KMS master key protection (`B2B_KMS_MASTER_KEY`), and zero-downtime key rotation.
+- **CRM Integration Connectors (`src/crm_connectors.rs`)**: Standardized inbound and outbound event webhooks for Chatwoot, Zendesk, HubSpot, and Salesforce.
+- **Zero-Markup Payment Intents (`src/billing.rs`, `src/routes.rs`)**: In-card transactional checkout intent generation with zero per-message fees.
+- **Prometheus Telemetry (`src/http_api.rs`)**: Real-time metrics counters for messages dispatched, rate limits, and active tenants.
 
-- [Development Standards](docs/STANDARDS.md)
-- [System Architecture](docs/ARCHITECTURE.md)
-- [Mermaid Diagrams](docs/DIAGRAMS.md)
-- [API Reference](docs/API.md)
-- [Configuration Guide](docs/CONFIGURATION.md)
+---
+
+## HTTP Endpoints Summary
+
+| Method | Endpoint | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Health and upstream node connectivity status |
+| `GET` | `/metrics` | Prometheus metrics scrape endpoint |
+| `POST` | `/v1/tenants` | Dynamic enterprise tenant registration |
+| `POST` | `/v1/tenants/rotate-key` | Rotate tenant Ed25519 signing keys |
+| `POST` | `/v1/messages` | Dispatch E2EE message or declarative card |
+| `POST` | `/v1/cards/actions` | Inbound signed user card action callback |
+| `POST` | `/v1/consents/revoke` | Revoke user promotional consent token |
+| `POST` | `/v1/payments/intents` | Create payment intent for zero-redirect card checkout |
+| `POST` | `/v1/whatsapp-compat/{phone_id}/messages` | Meta WhatsApp Cloud API compatibility endpoint |
+| `GET` | `/v1/tenants/{did}/analytics` | Tenant delivery volume and consent analytics |
+| `GET` | `/v1/tenants/{did}/subscription` | Tenant seat limits and subscription status |
+| `POST` | `/v1/integrations/crm/{provider}/events` | Inbound CRM integration webhook (Chatwoot, HubSpot, etc.) |
+
+---
+
+## Repository Layout
+
+```text
+sonaraim-b2b/
+├── docs/
+│   ├── ARCHITECTURE.md          # Enterprise gateway subsystem design
+│   ├── API.md                   # Complete REST & adapter API reference
+│   ├── CONFIGURATION.md         # Environment variable reference
+│   ├── DIAGRAMS.md              # Mermaid sequence and state diagrams
+│   └── STANDARDS.md             # Coding, testing, and linting rules
+├── src/
+│   ├── billing.rs               # Flat-rate seat billing & zero-markup take rates
+│   ├── config.rs                # Zero-hardcode runtime configuration
+│   ├── consent.rs               # Cryptographic Consent Gate & token validation
+│   ├── crm_connectors.rs        # Chatwoot, Zendesk, HubSpot, Salesforce connectors
+│   ├── fallback.rs              # Smart Fallback Engine & Instant Clip URL generator
+│   ├── http_api.rs              # Lightweight HTTP REST server & dispatch router
+│   ├── lib.rs                   # Crate root and public exports
+│   ├── main.rs                  # B2B daemon binary entry point
+│   ├── outbound_dispatcher.rs   # Signed outbound webhook worker with backoff
+│   ├── persistence.rs           # JSONL durable snapshot persistence
+│   ├── routes.rs                # Endpoint request handlers & response encoders
+│   ├── webhooks.rs              # Replay protection & signature validators
+│   └── whatsapp_adapter.rs      # Meta WhatsApp Cloud API template translator
+├── tests/
+│   ├── b2b_test.rs              # Core consent, config, and fallback unit tests
+│   ├── milestone3_test.rs       # CRM and HTTP API integration tests
+│   ├── milestone6_b2b_test.rs   # Redis rate limiting & JSONL persistence tests
+│   └── milestone12_b2b_test.rs  # WhatsApp E.164 normalization & rotation tests
+├── Cargo.toml                   # Rust crate manifest (Apache-2.0)
+├── CODE_OF_CONDUCT.md           # Contributor Covenant v2.1
+├── CONTRIBUTING.md              # Development, TDD & git workflow guide
+├── LICENSE                      # Apache License 2.0
+└── SECURITY.md                  # Vulnerability disclosure & enterprise security
+```
+
+---
 
 ## Quick Start
 
+### Build & Test
+
 ```bash
-cp samples/.env.example .env
-set -a && source .env && set +a
+# 1. Format check
+cargo fmt --check
+
+# 2. Static analysis
+cargo clippy --all-targets -- -D warnings
+
+# 3. Test execution
 cargo test
-cargo run
+
+# 4. Markdown linting
+npx --yes markdownlint-cli2 "*.md" "docs/*.md"
 ```
+
+---
+
+## Collaboration & Governance
+
+- **[Contributing Guide](CONTRIBUTING.md)** — Branching model (`develop`), TDD mandate, and commit conventions.
+- **[Code of Conduct](CODE_OF_CONDUCT.md)** — Community standards and enforcement guidelines.
+- **[Security Policy](SECURITY.md)** — Vulnerability reporting, SLAs, and enterprise threat model.
+- **[API Reference](docs/API.md)** — Complete REST, adapter, and connector documentation.
+- **[Configuration Guide](docs/CONFIGURATION.md)** — Environment variable specifications and validation rules.
+- **[Architecture Specification](docs/ARCHITECTURE.md)** — In-depth gateway design and ASCII layouts.
+- **[System Diagrams](docs/DIAGRAMS.md)** — Mermaid sequence, topology, and state diagrams.
+
+---
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+
+Copyright 2026 Sonaraim Contributors.
