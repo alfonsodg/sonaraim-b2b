@@ -2,11 +2,17 @@
 
 > Enterprise E2EE Bridge, 1-Click WhatsApp Cloud API Adapter, Cryptographic Consent Gate, and Smart Fallback Engine.
 
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Crate: Rust 2021](https://img.shields.io/badge/Crate-Rust%202021-DEA584.svg?logo=rust&logoColor=white)](Cargo.toml)
+[![Compatibility: WhatsApp Cloud API](https://img.shields.io/badge/Compatibility-WhatsApp%20Cloud%20API-25D366.svg?logo=whatsapp&logoColor=white)](src/whatsapp_adapter.rs)
+[![Governance: Cryptographic Consent Gate](https://img.shields.io/badge/Governance-Cryptographic%20Consent%20Gate-success.svg)](src/consent.rs)
+[![Fallback: Smart Instant Clip](https://img.shields.io/badge/Fallback-Smart%20Instant%20Clip-blue.svg)](src/fallback.rs)
+
 `sonaraim-b2b` connects modern enterprise business backends, CRMs, and AI agents directly to the decentralized Sonaraim messaging network without compromising user privacy, requiring complex client rewrites, or paying arbitrary per-message toll fees.
 
 ---
 
-## Key Capabilities
+## ⚡ Key Capabilities
 
 - **Enterprise E2EE Termination Bridge (`src/http_api.rs`, `src/routes.rs`)**: Terminates organization MLS 1.0 sessions and bridges encrypted communications into clean REST/gRPC events for internal CRMs and bots.
 - **1-Click WhatsApp Cloud API Adapter (`src/whatsapp_adapter.rs`)**: Drop-in compatible endpoint accepting standard Meta WhatsApp Business Cloud API JSON payloads and translating them into native declarative cards.
@@ -19,7 +25,63 @@
 
 ---
 
-## HTTP Endpoints Summary
+## 🏗️ B2B Gateway Architecture & Message Flow
+
+The following ASCII diagram illustrates the inbound enterprise bridging, WhatsApp API translation, consent verification, and fallback delivery mechanisms:
+
+```text
++-----------------------------------------------------------------------------------+
+|                        SONARAIM B2B GATEWAY ARCHITECTURE                          |
++-----------------------------------------------------------------------------------+
+|                                                                                   |
+|  [Enterprise CRMs & Bots]                   [Meta WhatsApp Cloud API Callers]     |
+|  - Chatwoot, Zendesk, Salesforce            - Legacy Cloud API POST JSON payloads |
+|  - AI Agent Webhooks & REST API             - Template messages & media alerts    |
+|            |                                              |                       |
+|            | HTTPS / REST                                 | Cloud API compat      |
+|            v                                              v                       |
+|  +-----------------------------------------------------------------------------+  |
+|  |                     INBOUND DISPATCHER & ADAPTER LAYER                      |  |
+|  |  * Meta WhatsApp Cloud API Translation Engine (whatsapp_adapter.rs)         |  |
+|  |  * REST Message Dispatch Router (http_api.rs, routes.rs)                    |  |
+|  +-------------------------------------+---------------------------------------+  |
+|                                        |                                          |
+|                                        v                                          |
+|  +-----------------------------------------------------------------------------+  |
+|  |                   CRYPTOGRAPHIC CONSENT GATE (consent.rs)                   |  |
+|  |  - Transactional / OTP / Utility  --> UNLIMITED FLAT-RATE DISPATCH          |  |
+|  |  - Promotional / Marketing Alerts --> VERIFY VALID USER ConsentToken        |  |
+|  +-------------------------------------+---------------------------------------+  |
+|                                        |                                          |
+|               +------------------------+------------------------+                 |
+|               | Recipient is onboarded                          | Non-onboarded   |
+|               v                                                 v                 |
+|  +------------------------------------+        +-------------------------------+  |
+|  |   ENTERPRISE MLS 1.0 TERMINATION   |        |   SMART FALLBACK ENGINE       |  |
+|  |   - Encrypts against user device   |        |   - Generates signed Instant  |  |
+|  |   - Wraps into Sealed Envelope     |        |     Web / App Clip Card URL   |  |
+|  |   - Submits to sonaraim-node relay |        |     {BASE}/c/{token}          |  |
+|  +------------------+-----------------+        +---------------+---------------+  |
+|                     |                                          |                  |
+|                     v                                          v                  |
+|          +---------------------+                    +---------------------+       |
+|          |    sonaraim-node    |                    | Instant Web Browser |       |
+|          |    Relay Mailbox    |                    | & App Clip Preview  |       |
+|          +---------------------+                    +---------------------+       |
+|                                                                                   |
+|  INBOUND USER CARD ACTIONS & ZERO-MARKUP PAYMENTS:                                |
+|  - User taps interactive card button -> POST /v1/cards/actions (signed intent)    |
+|  - Outbound Webhook Dispatcher forwards to Chatwoot/HubSpot CRM (webhooks.rs)    |
+|  - Zero-markup Payment Intents -> POST /v1/payments/intents (billing.rs)          |
++-----------------------------------------------------------------------------------+
+```
+
+> [!NOTE]
+> For full Mermaid sequence diagrams of WhatsApp conversion flows, consent token validation, and instant clip fallbacks, see [docs/DIAGRAMS.md](docs/DIAGRAMS.md).
+
+---
+
+## 📊 HTTP Endpoints Summary
 
 | Method | Endpoint | Purpose |
 | :--- | :--- | :--- |
@@ -38,7 +100,7 @@
 
 ---
 
-## Repository Layout
+## 🧩 Repository Layout
 
 ```text
 sonaraim-b2b/
@@ -76,7 +138,7 @@ sonaraim-b2b/
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ### Build & Test
 
@@ -96,7 +158,7 @@ npx --yes markdownlint-cli2 "*.md" "docs/*.md"
 
 ---
 
-## Collaboration & Governance
+## 🌐 Collaboration & Governance
 
 - **[Contributing Guide](CONTRIBUTING.md)** — Branching model (`develop`), TDD mandate, and commit conventions.
 - **[Code of Conduct](CODE_OF_CONDUCT.md)** — Community standards and enforcement guidelines.
@@ -108,7 +170,7 @@ npx --yes markdownlint-cli2 "*.md" "docs/*.md"
 
 ---
 
-## License
+## 📜 License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
 
