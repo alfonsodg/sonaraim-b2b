@@ -45,6 +45,10 @@ pub struct B2bConfig {
     pub instant_clip_base_url: String,
     /// Maximum promotional requests per second per tenant (`B2B_PROMO_RATE_LIMIT_RPS`).
     pub promo_rate_limit_rps: u32,
+    /// File path for durable JSONL state snapshots (`B2B_STORAGE_PATH`).
+    pub storage_path: String,
+    /// Whether `http://` and loopback callback URLs are permitted (dev/test only via `B2B_ALLOW_INSECURE_CALLBACKS`).
+    pub allow_insecure_callbacks: bool,
 }
 
 impl B2bConfig {
@@ -78,6 +82,9 @@ impl B2bConfig {
                 .trim_end_matches('/')
                 .to_string();
         let promo_rate_limit_rps = Self::require_u32(&mut lookup, "B2B_PROMO_RATE_LIMIT_RPS")?;
+        let storage_path = Self::require_non_empty(&mut lookup, "B2B_STORAGE_PATH")?;
+        let allow_insecure_callbacks =
+            Self::optional_bool(&mut lookup, "B2B_ALLOW_INSECURE_CALLBACKS")?;
 
         Ok(Self {
             http_host,
@@ -86,6 +93,8 @@ impl B2bConfig {
             node_rpc_url,
             instant_clip_base_url,
             promo_rate_limit_rps,
+            storage_path,
+            allow_insecure_callbacks,
         })
     }
 
@@ -136,5 +145,24 @@ impl B2bConfig {
             });
         }
         Ok(parsed)
+    }
+
+    /// Reads an optional boolean variable, defaulting to `false` when unset or empty.
+    fn optional_bool<F>(lookup: &mut F, name: &'static str) -> Result<bool, ConfigError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        match lookup(name) {
+            None => Ok(false),
+            Some(val) if val.trim().is_empty() => Ok(false),
+            Some(val) => match val.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => Ok(true),
+                "false" | "0" | "no" => Ok(false),
+                _ => Err(ConfigError::InvalidVar {
+                    name,
+                    reason: format!("expected boolean, got '{}'", val.trim()),
+                }),
+            },
+        }
     }
 }

@@ -20,6 +20,8 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
         node_rpc_url: "http://127.0.0.1:18031".to_string(),
         instant_clip_base_url: "https://go.sonaraim.com".to_string(),
         promo_rate_limit_rps: promo_rps,
+        storage_path: "/var/lib/sonaraim-b2b/test-state.jsonl".to_string(),
+        allow_insecure_callbacks: false,
     }
 }
 
@@ -106,10 +108,19 @@ fn outbound_retry_backoff_and_upstream_whatsapp_psp_forwarding_work() {
 #[test]
 fn webhook_timestamp_replay_window_and_tenant_key_rotation_work() {
     let payload = r#"{"card_id":"c-99","action_id":"approve"}"#;
-    let sig = compute_webhook_signature(payload);
+    let sig = compute_webhook_signature(b"sec", payload);
     // Fresh timestamp within 300s window passes
     assert!(verify_timestamped_webhook(
         b"sec",
+        1_700_000_100,
+        1_700_000_200,
+        300,
+        payload.as_bytes(),
+        &sig
+    ));
+    // Wrong key is rejected
+    assert!(!verify_timestamped_webhook(
+        b"wrong-sec",
         1_700_000_100,
         1_700_000_200,
         300,

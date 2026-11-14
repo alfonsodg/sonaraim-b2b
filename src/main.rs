@@ -18,9 +18,8 @@ fn main() {
                 cfg.instant_clip_base_url,
                 cfg.promo_rate_limit_rps
             );
+            let storage_path = cfg.storage_path.clone();
             let mut state = B2bState::new(cfg);
-            let storage_path = std::env::var("B2B_STORAGE_PATH")
-                .unwrap_or_else(|_| "/tmp/sonaraim-b2b-state.jsonl".to_string());
             state.set_storage_path(&storage_path);
             state.register_bootstrap_tenant(
                 std::env::var("B2B_BOOTSTRAP_TENANT_DID").ok().as_deref(),

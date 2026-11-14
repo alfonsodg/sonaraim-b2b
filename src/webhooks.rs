@@ -1,5 +1,6 @@
 //! Lightweight HTTP/1.1 parser, JSON field extractor, and webhook signature helpers.
 
+use crate::hmac_sha256::{constant_time_eq, hmac_sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -133,29 +134,25 @@ pub fn json_bool(body: &str, key: &str) -> Option<bool> {
     }
 }
 
-/// Computes a deterministic 64-bit hex signature for webhook payload verification.
-pub fn compute_webhook_signature(payload: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in payload.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("sha256={hash:016x}")
+/// Computes a keyed HMAC-SHA256 hex signature (`sha256=<hex>`) for webhook payload verification.
+pub fn compute_webhook_signature(secret: &[u8], payload: &str) -> String {
+    let mac = hmac_sha256(secret, payload.as_bytes());
+    format!("sha256={}", encode_hex(&mac))
 }
 
-/// Validates an incoming `X-Sonaraim-Signature` header value.
-pub fn verify_webhook_signature(payload: &str, provided: &str) -> bool {
+/// Validates an incoming `X-Sonaraim-Signature` header value in constant time using `secret`.
+pub fn verify_webhook_signature(secret: &[u8], payload: &str, provided: &str) -> bool {
     let trimmed = provided.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("invalid") {
+    if secret.is_empty() || trimmed.is_empty() {
         return false;
     }
-    trimmed == compute_webhook_signature(payload)
-        || (trimmed.starts_with("sig_") && trimmed.len() > 8)
+    let expected = compute_webhook_signature(secret, payload);
+    constant_time_eq(trimmed.as_bytes(), expected.as_bytes())
 }
 
 /// Validates an incoming signed webhook against a strict timestamp replay window (`±max_skew_secs`).
 pub fn verify_timestamped_webhook(
-    _secret: &[u8],
+    secret: &[u8],
     timestamp_secs: u64,
     now_secs: u64,
     max_skew_secs: u64,
@@ -166,7 +163,7 @@ pub fn verify_timestamped_webhook(
         return false;
     }
     let body_str = String::from_utf8_lossy(payload);
-    verify_webhook_signature(&body_str, sig_header)
+    verify_webhook_signature(secret, &body_str, sig_header)
 }
 
 /// Encodes a byte slice as a lowercase hexadecimal string.
