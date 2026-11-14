@@ -69,7 +69,7 @@ impl B2bState {
             tenants: HashMap::new(),
             api_keys: HashMap::new(),
             revoked_consents: HashSet::new(),
-            storage_path: std::env::var("B2B_STORAGE_PATH").ok(),
+            storage_path: None,
             admin_key: std::env::var("B2B_KMS_MASTER_KEY").ok(),
             redis_url: std::env::var("REDIS_URL")
                 .ok()

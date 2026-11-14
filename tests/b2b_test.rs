@@ -18,6 +18,7 @@ fn config_loads_valid_environment_variables() {
         ("B2B_NODE_RPC_URL", "http://sonaraim-node:8031"),
         ("B2B_INSTANT_CLIP_BASE_URL", "https://clip.sonaraim.io/"),
         ("B2B_PROMO_RATE_LIMIT_RPS", "50"),
+        ("B2B_STORAGE_PATH", "/var/lib/sonaraim-b2b/state.jsonl"),
     ]);
 
     let cfg = B2bConfig::from_lookup(|k| vars.get(k).map(|v| (*v).to_string()))
@@ -29,6 +30,8 @@ fn config_loads_valid_environment_variables() {
     assert_eq!(cfg.node_rpc_url, "http://sonaraim-node:8031");
     assert_eq!(cfg.instant_clip_base_url, "https://clip.sonaraim.io");
     assert_eq!(cfg.promo_rate_limit_rps, 50);
+    assert_eq!(cfg.storage_path, "/var/lib/sonaraim-b2b/state.jsonl");
+    assert!(!cfg.allow_insecure_callbacks);
 }
 
 #[test]

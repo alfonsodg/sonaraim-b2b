@@ -7,6 +7,7 @@ use crate::http_api::B2bState;
 use crate::outbound_dispatcher::{
     configured_timeout_ms, forward_to_node_relay, post_json_with_retry, sync_optional_upstream,
 };
+use crate::url_validator::validate_callback_url;
 use crate::webhooks::{
     HttpRequest, compute_webhook_signature, json_str, json_u64, verify_webhook_signature,
 };
@@ -90,36 +91,52 @@ pub(crate) fn handle_card_action(
     let Some(auth_tenant) = guard.authenticate(req) else {
         return err(401, "Unauthorized", "unauthorized");
     };
+    let tenant_secret = guard
+        .tenants
+        .get(&auth_tenant)
+        .map(|t| t.api_key.as_bytes().to_vec())
+        .unwrap_or_default();
     let header_sig = req
         .headers
         .get("x-sonaraim-signature")
         .cloned()
         .unwrap_or_default();
     let user_sig = json_str(&req.body, "user_signature").unwrap_or(header_sig);
-    if !verify_webhook_signature(&req.body, &user_sig) {
+    if !verify_webhook_signature(&tenant_secret, &req.body, &user_sig) {
         return err(401, "Unauthorized", "invalid_signature");
     }
-    let tenant_did = json_str(&req.body, "tenant_did").unwrap_or(auth_tenant);
-    if let Some(tenant) = guard.tenants.get_mut(&tenant_did) {
+    if let Some(body_tenant) = json_str(&req.body, "tenant_did")
+        && !body_tenant.trim().is_empty()
+        && body_tenant.trim() != auth_tenant
+    {
+        return err(403, "Forbidden", "forbidden_tenant_mismatch");
+    }
+    let callback_url = json_str(&req.body, "callback_url")
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
+    if let Some(ref url) = callback_url
+        && let Err(reason) = validate_callback_url(url, guard.config.allow_insecure_callbacks)
+    {
+        return err(400, "Bad Request", reason);
+    }
+    if let Some(tenant) = guard.tenants.get_mut(&auth_tenant) {
         tenant.card_actions += 1;
     }
     crate::persistence::persist_if_configured(&guard);
     drop(guard);
-    let webhook_sig = compute_webhook_signature(&req.body);
-    let delivered = json_str(&req.body, "callback_url")
-        .filter(|u| !u.trim().is_empty())
-        .is_some_and(|url| {
-            matches!(
-                post_json_with_retry(
-                    &url,
-                    &[("X-Sonaraim-Signature", &webhook_sig)],
-                    &req.body,
-                    configured_timeout_ms(),
-                    2,
-                ),
-                Ok(st) if (200..300).contains(&st)
-            )
-        });
+    let webhook_sig = compute_webhook_signature(&tenant_secret, &req.body);
+    let delivered = callback_url.is_some_and(|url| {
+        matches!(
+            post_json_with_retry(
+                &url,
+                &[("X-Sonaraim-Signature", &webhook_sig)],
+                &req.body,
+                configured_timeout_ms(),
+                2,
+            ),
+            Ok(st) if (200..300).contains(&st)
+        )
+    });
     (
         200,
         "OK",

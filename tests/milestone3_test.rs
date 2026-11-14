@@ -9,6 +9,7 @@ use sonaraim_b2b::billing::{PaymentProvider, SaasPlanTier, compute_take_rate_min
 use sonaraim_b2b::config::B2bConfig;
 use sonaraim_b2b::crm_connectors::{CrmProvider, normalize_crm_event};
 use sonaraim_b2b::http_api::{B2bState, start_test_server};
+use sonaraim_b2b::webhooks::compute_webhook_signature;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -20,6 +21,8 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
         node_rpc_url: "http://127.0.0.1:8040".to_string(),
         instant_clip_base_url: "https://go.sonaraim.com".to_string(),
         promo_rate_limit_rps: promo_rps,
+        storage_path: "/var/lib/sonaraim-b2b/test-state.jsonl".to_string(),
+        allow_insecure_callbacks: false,
     }
 }
 
@@ -103,12 +106,19 @@ fn http_api_enforces_auth_messages_whatsapp_webhooks_and_rate_limits() {
     assert_eq!(st, 200);
     assert!(wa_resp.contains("SONARAIM_CARD"));
 
+    let action_body =
+        r#"{"card_id":"ord-1","action_id":"confirm_handover","user_did":"did:sonaraim:alice"}"#;
+    let action_sig = compute_webhook_signature(b"tok-clinic-1", action_body);
+    let action_headers = [
+        ("Authorization", "Bearer tok-clinic-1"),
+        ("X-Sonaraim-Signature", action_sig.as_str()),
+    ];
     let (st, act_resp) = send_http(
         &addr,
         "POST",
         "/v1/cards/actions",
-        &auth,
-        r#"{"card_id":"ord-1","action_id":"confirm_handover","user_did":"did:sonaraim:alice","user_signature":"sig_valid_01"}"#,
+        &action_headers,
+        action_body,
     );
     assert_eq!(st, 200);
     assert!(act_resp.contains("X-Sonaraim-Signature"));

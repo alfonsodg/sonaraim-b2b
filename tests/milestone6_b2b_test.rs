@@ -7,6 +7,7 @@ use sonaraim_b2b::config::B2bConfig;
 use sonaraim_b2b::http_api::{B2bState, start_test_server};
 use sonaraim_b2b::outbound_dispatcher::{post_json_with_timeout, start_ai_stream_listener};
 use sonaraim_b2b::persistence::{check_redis_rate_limit, load_snapshot, save_snapshot};
+use sonaraim_b2b::webhooks::compute_webhook_signature;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -21,6 +22,8 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
         node_rpc_url: "http://127.0.0.1:18031".to_string(),
         instant_clip_base_url: "https://go.sonaraim.com".to_string(),
         promo_rate_limit_rps: promo_rps,
+        storage_path: "/var/lib/sonaraim-b2b/test-state.jsonl".to_string(),
+        allow_insecure_callbacks: false,
     }
 }
 
@@ -213,6 +216,7 @@ fn outbound_webhook_dispatcher_and_node_relay_forwarding_work() {
 
     let mut cfg = sample_config(10);
     cfg.node_rpc_url = format!("http://{node_addr}");
+    cfg.allow_insecure_callbacks = true;
     let mut state = B2bState::new(cfg);
     state.register_tenant(
         "did:web:merchant.example.com",
@@ -242,9 +246,14 @@ fn outbound_webhook_dispatcher_and_node_relay_forwarding_work() {
     // Submit card action with callback_url -> dispatches signed webhook
     let callback_url = format!("http://{hook_addr}/webhooks/sonaraim");
     let body = format!(
-        r#"{{"card_id":"c-7","action_id":"pay","user_did":"did:sonaraim:carol","user_signature":"sig_valid_77","callback_url":"{callback_url}"}}"#
+        r#"{{"card_id":"c-7","action_id":"pay","user_did":"did:sonaraim:carol","callback_url":"{callback_url}"}}"#
     );
-    let (st, act_resp) = send_http(&b2b_addr, "POST", "/v1/cards/actions", &auth, &body);
+    let action_sig = compute_webhook_signature(b"sk_merchant_1", &body);
+    let act_headers = [
+        ("Authorization", "Bearer sk_merchant_1"),
+        ("X-Sonaraim-Signature", action_sig.as_str()),
+    ];
+    let (st, act_resp) = send_http(&b2b_addr, "POST", "/v1/cards/actions", &act_headers, &body);
     assert_eq!(st, 200);
     assert!(act_resp.contains("\"webhook_delivered\":true"));
 
