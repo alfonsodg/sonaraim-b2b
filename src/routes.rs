@@ -25,7 +25,7 @@ pub(crate) fn handle_whatsapp_compat(
     req: &HttpRequest,
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
-    let (node_rpc_url, tenant_did, seq) = {
+    let (node_rpc_url, node_api_token, tenant_did, seq) = {
         let Ok(mut guard) = shared.lock() else {
             return err(500, "Internal Server Error", "state_lock_poisoned");
         };
@@ -37,7 +37,12 @@ pub(crate) fn handle_whatsapp_compat(
             tenant.messages_sent += 1;
             seq = tenant.messages_sent;
         }
-        (guard.config.node_rpc_url.clone(), tenant_did, seq)
+        (
+            guard.config.node_rpc_url.clone(),
+            guard.config.node_api_token.clone(),
+            tenant_did,
+            seq,
+        )
     };
     let raw_to = json_str(&req.body, "recipient_did")
         .or_else(|| json_str(&req.body, "to"))
@@ -63,17 +68,31 @@ pub(crate) fn handle_whatsapp_compat(
         Ok(card) => {
             let card_json = card.to_json();
             let queued_id = if let Ok(guard) = shared.lock() {
+                let auth_header = if node_api_token.trim().is_empty() {
+                    vec![]
+                } else {
+                    vec![(
+                        "Authorization".to_string(),
+                        format!("Bearer {}", node_api_token.trim()),
+                    )]
+                };
                 crate::delivery_wiring::enqueue_delivery(
                     &guard,
                     &format!("{}/v1/relay/envelopes", node_rpc_url.trim_end_matches('/')),
-                    vec![],
+                    auth_header,
                     &card_json,
                 )
             } else {
                 None
             };
-            let relayed =
-                forward_to_node_relay(&node_rpc_url, &tenant_did, &recipient_did, seq, &card_json);
+            let relayed = forward_to_node_relay(
+                &node_rpc_url,
+                &node_api_token,
+                &tenant_did,
+                &recipient_did,
+                seq,
+                &card_json,
+            );
             if relayed && let (Some(id), Ok(guard)) = (queued_id.as_ref(), shared.lock()) {
                 crate::delivery_wiring::confirm_delivered(&guard, id);
             }

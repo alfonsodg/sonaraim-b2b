@@ -14,6 +14,7 @@ All runtime settings in `sonaraim-b2b` are explicitly loaded from process enviro
 | `B2B_HTTP_PORT` | `u16` | Yes | TCP port for the HTTP REST & WhatsApp adapter server (`1..=65535`). | `8042` |
 | `B2B_GRPC_PORT` | `u16` | Yes | TCP port for the internal AI stream listener (`1..=65535`; plain TCP/JSON, not gRPC). | `8043` |
 | `B2B_NODE_RPC_URL` | `String` | Yes | Upstream `sonaraim-node` RPC endpoint for native MLS E2EE dispatch. | `http://sonaraim-node:8040` |
+| `B2B_NODE_API_TOKEN` | `String` | No | Optional Bearer token sent as `Authorization: Bearer <token>` on every b2b-to-node relay forward call (`POST {B2B_NODE_RPC_URL}/v1/relay/envelopes`, fast path and queue drain worker). Empty (default) sends no `Authorization` header — dev-only, works solely against unauthenticated nodes; token-protected nodes (fail-closed Bearer since node#14) answer `401` without it. | `secret-node-relay-token` |
 | `B2B_INSTANT_CLIP_BASE_URL` | `String` | Yes | Base URL used by `SmartFallbackEngine` to build Instant Web / App Clip links. | `https://clip.sonaraim.io` |
 | `B2B_PROMO_RATE_LIMIT_RPS` | `u32` | Yes | Maximum promotional messages per window per verified enterprise tenant (`>= 1`). | `50` |
 | `B2B_STORAGE_PATH` | `String` | Yes | Filesystem path for durable JSONL tenant state snapshots (required). | `/var/lib/sonaraim/b2b-state.jsonl` |
@@ -63,7 +64,8 @@ All runtime settings in `sonaraim-b2b` are explicitly loaded from process enviro
 When `B2bConfig::from_env()` executes:
 
 1. `B2B_HTTP_HOST`, `B2B_NODE_RPC_URL`, and `B2B_INSTANT_CLIP_BASE_URL` must be non-empty strings.
-2. `B2B_HTTP_PORT` and `B2B_GRPC_PORT` must be valid non-zero `u16` integers (`1..=65535`).
-3. `B2B_PROMO_RATE_LIMIT_RPS` must be a valid non-zero `u32` integer (`>= 1`).
-4. `B2B_STORAGE_PATH` must be a non-empty string (required).
-5. Trailing slashes in `B2B_INSTANT_CLIP_BASE_URL` are automatically stripped for canonical URL joining.
+2. `B2B_NODE_API_TOKEN` is optional: when set (non-blank) it is sent trimmed as `Authorization: Bearer <token>` on relay forward calls; when unset/blank no header is sent.
+3. `B2B_HTTP_PORT` and `B2B_GRPC_PORT` must be valid non-zero `u16` integers (`1..=65535`).
+4. `B2B_PROMO_RATE_LIMIT_RPS` must be a valid non-zero `u32` integer (`>= 1`).
+5. `B2B_STORAGE_PATH` must be a non-empty string (required).
+6. Trailing slashes in `B2B_INSTANT_CLIP_BASE_URL` are automatically stripped for canonical URL joining.

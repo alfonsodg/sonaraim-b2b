@@ -369,20 +369,41 @@ fn handle_dispatch_message(
             // Durable intent first: enqueue the relay envelope (when the
             // queue is enabled) so a crash after the 202 never loses the
             // delivery. The fast path below attempts immediate dispatch and
-            // drops the queued intent on success (exactly-once).
+            // drops the queued intent on success (exactly-once). The queued
+            // job carries the same node Bearer header so the drain worker
+            // forwards it authenticated too (b2b#8).
+            let node_api_token = if let Ok(guard) = shared.lock() {
+                guard.config.node_api_token.clone()
+            } else {
+                String::new()
+            };
             let queued_id = if let Ok(guard) = shared.lock() {
+                let auth_header = if node_api_token.trim().is_empty() {
+                    vec![]
+                } else {
+                    vec![(
+                        "Authorization".to_string(),
+                        format!("Bearer {}", node_api_token.trim()),
+                    )]
+                };
                 crate::delivery_wiring::enqueue_delivery(
                     &guard,
                     &format!("{}/v1/relay/envelopes", node_rpc_url.trim_end_matches('/')),
-                    vec![],
+                    auth_header,
                     &req.body,
                 )
             } else {
                 None
             };
             let effective_id = queued_id.as_deref().unwrap_or(&delivery_id);
-            let relayed =
-                forward_to_node_relay(&node_rpc_url, &tenant_did, &recipient_did, seq, &req.body);
+            let relayed = forward_to_node_relay(
+                &node_rpc_url,
+                &node_api_token,
+                &tenant_did,
+                &recipient_did,
+                seq,
+                &req.body,
+            );
             if relayed && let Ok(guard) = shared.lock() {
                 crate::delivery_wiring::confirm_delivered(&guard, effective_id);
             }

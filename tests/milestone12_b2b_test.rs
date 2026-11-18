@@ -18,6 +18,7 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
         http_port: 8041,
         grpc_port: 8042,
         node_rpc_url: "http://127.0.0.1:18031".to_string(),
+        node_api_token: String::new(),
         instant_clip_base_url: "https://go.sonaraim.com".to_string(),
         promo_rate_limit_rps: promo_rps,
         storage_path: "/var/lib/sonaraim-b2b/test-state.jsonl".to_string(),
@@ -287,9 +288,10 @@ fn relay_forwarding_encodes_real_message_card_json_in_payload_hex() {
     let expected_sub = encode_hex(b"Order #881 Ready");
     assert!(payload_hex.contains(&expected_sub));
 
-    // Also test direct 5-arg forward_to_node_relay call against offline port returns false cleanly
+    // Also test direct 6-arg forward_to_node_relay call against offline port returns false cleanly
     assert!(!forward_to_node_relay(
         "http://127.0.0.1:9",
+        "",
         "did:web:bakery.example.com",
         "did:sonaraim:elena",
         1,

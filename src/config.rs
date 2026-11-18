@@ -41,6 +41,12 @@ pub struct B2bConfig {
     pub grpc_port: u16,
     /// Upstream `sonaraim-node` RPC URL (`B2B_NODE_RPC_URL`).
     pub node_rpc_url: String,
+    /// Optional Bearer token sent as `Authorization: Bearer <token>` on
+    /// b2b-to-node relay forward calls (`B2B_NODE_API_TOKEN`, empty by
+    /// default). Empty means no `Authorization` header is sent: dev-only,
+    /// works solely against unauthenticated nodes; token-protected nodes
+    /// (fail-closed Bearer since node#14) answer 401 without it.
+    pub node_api_token: String,
     /// Base URL for Instant Web / App Clip magic links (`B2B_INSTANT_CLIP_BASE_URL`).
     pub instant_clip_base_url: String,
     /// Maximum promotional requests per second per tenant (`B2B_PROMO_RATE_LIMIT_RPS`).
@@ -77,6 +83,7 @@ impl B2bConfig {
         let http_port = Self::require_u16(&mut lookup, "B2B_HTTP_PORT")?;
         let grpc_port = Self::require_u16(&mut lookup, "B2B_GRPC_PORT")?;
         let node_rpc_url = Self::require_non_empty(&mut lookup, "B2B_NODE_RPC_URL")?;
+        let node_api_token = Self::optional_string(&mut lookup, "B2B_NODE_API_TOKEN")?;
         let instant_clip_base_url =
             Self::require_non_empty(&mut lookup, "B2B_INSTANT_CLIP_BASE_URL")?
                 .trim_end_matches('/')
@@ -91,6 +98,7 @@ impl B2bConfig {
             http_port,
             grpc_port,
             node_rpc_url,
+            node_api_token,
             instant_clip_base_url,
             promo_rate_limit_rps,
             storage_path,
@@ -107,6 +115,17 @@ impl B2bConfig {
             Some(val) if !val.trim().is_empty() => Ok(val.trim().to_string()),
             _ => Err(ConfigError::MissingVar(name)),
         }
+    }
+
+    /// Reads an optional string variable, defaulting to empty when unset or blank.
+    fn optional_string<F>(lookup: &mut F, name: &'static str) -> Result<String, ConfigError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        Ok(match lookup(name) {
+            Some(val) if !val.trim().is_empty() => val.trim().to_string(),
+            _ => String::new(),
+        })
     }
 
     /// Reads and parses a required non-zero `u16` port variable.
