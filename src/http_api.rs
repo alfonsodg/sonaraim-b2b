@@ -192,13 +192,13 @@ fn route_request(req: &HttpRequest, shared: &Arc<Mutex<B2bState>>) -> (u16, &'st
             let did = p
                 .trim_start_matches("/v1/tenants/")
                 .trim_end_matches("/analytics");
-            handle_tenant_analytics(did, shared)
+            handle_tenant_analytics(req, did, shared)
         }
         ("GET", p) if p.starts_with("/v1/tenants/") && p.ends_with("/subscription") => {
             let did = p
                 .trim_start_matches("/v1/tenants/")
                 .trim_end_matches("/subscription");
-            handle_tenant_subscription(did, shared)
+            handle_tenant_subscription(req, did, shared)
         }
         ("POST", p) if p.starts_with("/v1/integrations/crm/") && p.ends_with("/events") => {
             let prov = p

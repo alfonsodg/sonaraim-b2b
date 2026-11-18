@@ -147,13 +147,22 @@ pub(crate) fn handle_card_action(
 }
 
 /// Returns real-time message and card action analytics for a tenant DID.
+/// Requires the tenant's own Bearer token (`403` when `did` differs from the
+/// authenticated tenant, same IDOR pattern as [`handle_card_action`]).
 pub(crate) fn handle_tenant_analytics(
+    req: &HttpRequest,
     did: &str,
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
         return err(500, "Internal Server Error", "state_lock_poisoned");
     };
+    let Some(auth_tenant) = guard.authenticate(req) else {
+        return err(401, "Unauthorized", "unauthorized");
+    };
+    if auth_tenant != did.trim() {
+        return err(403, "Forbidden", "forbidden_tenant_mismatch");
+    }
     match guard.tenants.get(did) {
         Some(t) => (
             200,
@@ -168,13 +177,22 @@ pub(crate) fn handle_tenant_analytics(
 }
 
 /// Returns SaaS subscription metadata with 0% per-message markup.
+/// Requires the tenant's own Bearer token (`403` when `did` differs from the
+/// authenticated tenant, same IDOR pattern as [`handle_card_action`]).
 pub(crate) fn handle_tenant_subscription(
+    req: &HttpRequest,
     did: &str,
     shared: &Arc<Mutex<B2bState>>,
 ) -> (u16, &'static str, String) {
     let Ok(guard) = shared.lock() else {
         return err(500, "Internal Server Error", "state_lock_poisoned");
     };
+    let Some(auth_tenant) = guard.authenticate(req) else {
+        return err(401, "Unauthorized", "unauthorized");
+    };
+    if auth_tenant != did.trim() {
+        return err(403, "Forbidden", "forbidden_tenant_mismatch");
+    }
     match guard.tenants.get(did) {
         Some(t) => (
             200,
