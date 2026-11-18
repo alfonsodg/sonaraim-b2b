@@ -20,6 +20,7 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
         http_port: 8041,
         grpc_port: 8042,
         node_rpc_url: "http://127.0.0.1:18031".to_string(),
+        node_api_token: String::new(),
         instant_clip_base_url: "https://go.sonaraim.com".to_string(),
         promo_rate_limit_rps: promo_rps,
         storage_path: "/var/lib/sonaraim-b2b/test-state.jsonl".to_string(),

@@ -19,6 +19,7 @@ fn sample_config() -> B2bConfig {
         http_port: 8041,
         grpc_port: 8042,
         node_rpc_url: "http://127.0.0.1:9".to_string(),
+        node_api_token: String::new(),
         instant_clip_base_url: "https://go.sonaraim.com".to_string(),
         promo_rate_limit_rps: 50,
         storage_path: "/var/lib/sonaraim-b2b/test-state.jsonl".to_string(),
@@ -76,6 +77,7 @@ fn relay_forwarder_with_retry_reports_real_outcome() {
     // Unreachable relay: retry variant reports failure explicitly.
     let fail = forward_to_node_relay_with_retry(
         "http://127.0.0.1:9",
+        "",
         "did:web:t.example.com",
         "did:sonaraim:bob",
         7,
@@ -99,6 +101,7 @@ fn relay_forwarder_with_retry_reports_real_outcome() {
     });
     let ok = forward_to_node_relay_with_retry(
         &format!("http://{relay_addr}"),
+        "",
         "did:web:t.example.com",
         "did:sonaraim:bob",
         8,

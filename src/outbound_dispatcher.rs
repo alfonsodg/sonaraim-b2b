@@ -127,8 +127,13 @@ pub fn configured_timeout_ms() -> u64 {
 }
 
 /// Forwards a sealed MLS envelope to `{node_rpc_url}/v1/relay/envelopes`.
+/// `node_api_token` is the optional `B2B_NODE_API_TOKEN`: when non-empty an
+/// `Authorization: Bearer <token>` header is sent (required by
+/// token-protected nodes, fail-closed Bearer since node#14); when empty no
+/// header is sent (dev-only, unauthenticated nodes only).
 pub fn forward_to_node_relay(
     node_rpc_url: &str,
+    node_api_token: &str,
     tenant_did: &str,
     recipient_did: &str,
     seq: u64,
@@ -136,6 +141,7 @@ pub fn forward_to_node_relay(
 ) -> bool {
     forward_to_node_relay_with_retry(
         node_rpc_url,
+        node_api_token,
         tenant_did,
         recipient_did,
         seq,
@@ -186,6 +192,7 @@ fn relay_envelope_payload(
 /// the real outcome (attempts + last error) instead of a silent boolean.
 pub fn forward_to_node_relay_with_retry(
     node_rpc_url: &str,
+    node_api_token: &str,
     tenant_did: &str,
     recipient_did: &str,
     seq: u64,
@@ -195,11 +202,18 @@ pub fn forward_to_node_relay_with_retry(
     let url = format!("{}/v1/relay/envelopes", node_rpc_url.trim_end_matches('/'));
     let (_env_id, payload) =
         relay_envelope_payload(tenant_did, recipient_did, seq, raw_message_json);
+    let token = node_api_token.trim();
+    let auth_value = format!("Bearer {token}");
+    let auth_headers: Vec<(&str, &str)> = if token.is_empty() {
+        vec![]
+    } else {
+        vec![("Authorization", auth_value.as_str())]
+    };
     let mut last_error = String::from("unattempted");
     let mut attempts = 0u32;
     for attempt in 0..=max_retries {
         attempts = attempts.saturating_add(1);
-        match post_json_with_timeout(&url, &[], &payload, configured_timeout_ms()) {
+        match post_json_with_timeout(&url, &auth_headers, &payload, configured_timeout_ms()) {
             Ok(status) if (200..300).contains(&status) => {
                 return RelayOutcome {
                     delivered: true,
