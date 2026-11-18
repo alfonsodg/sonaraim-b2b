@@ -118,7 +118,10 @@ fn http_api_enforces_auth_messages_whatsapp_webhooks_and_rate_limits() {
         ts_now()
     );
     let action_body = action_body.as_str();
-    let action_sig = compute_webhook_signature(b"tok-clinic-1", action_body);
+    let action_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:clinic.example.com"),
+        action_body,
+    );
     let action_headers = [
         ("Authorization", "Bearer tok-clinic-1"),
         ("X-Sonaraim-Signature", action_sig.as_str()),

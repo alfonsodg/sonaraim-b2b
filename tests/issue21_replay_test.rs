@@ -65,7 +65,10 @@ fn live_route_rejects_stale_timestamp_and_accepts_fresh() {
     let fresh_body = format!(
         "{{\"card_id\":\"c-1\",\"action_id\":\"approve\",\"webhook_timestamp\":{fresh_ts}}}"
     );
-    let fresh_sig = compute_webhook_signature(b"sk_replay_1", &fresh_body);
+    let fresh_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:replay.example.com"),
+        &fresh_body,
+    );
     let (st, resp) = send_action(&addr, "sk_replay_1", &fresh_sig, &fresh_body);
     assert_eq!(st, 200, "fresh webhook must pass, got {resp}");
     assert!(resp.contains("\"verified\":true"));
@@ -75,14 +78,20 @@ fn live_route_rejects_stale_timestamp_and_accepts_fresh() {
     let stale_body = format!(
         "{{\"card_id\":\"c-1\",\"action_id\":\"approve\",\"webhook_timestamp\":{stale_ts}}}"
     );
-    let stale_sig = compute_webhook_signature(b"sk_replay_1", &stale_body);
+    let stale_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:replay.example.com"),
+        &stale_body,
+    );
     let (st, resp) = send_action(&addr, "sk_replay_1", &stale_sig, &stale_body);
     assert_eq!(st, 403, "stale webhook must be rejected, got {resp}");
     assert!(resp.contains("stale_webhook_timestamp"));
 
     // Missing timestamp is rejected explicitly (no silent bypass).
     let no_ts_body = r#"{"card_id":"c-1","action_id":"approve"}"#;
-    let no_ts_sig = compute_webhook_signature(b"sk_replay_1", no_ts_body);
+    let no_ts_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:replay.example.com"),
+        no_ts_body,
+    );
     let (st, resp) = send_action(&addr, "sk_replay_1", &no_ts_sig, no_ts_body);
     assert_eq!(st, 400, "missing timestamp must be rejected, got {resp}");
     assert!(resp.contains("missing_webhook_timestamp"));

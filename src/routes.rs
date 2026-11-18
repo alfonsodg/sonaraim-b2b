@@ -7,6 +7,7 @@ use crate::http_api::B2bState;
 use crate::outbound_dispatcher::{
     configured_timeout_ms, forward_to_node_relay, post_json_with_retry, sync_optional_upstream,
 };
+use crate::persistence::derive_signing_secret;
 use crate::url_validator::validate_callback_url;
 use crate::webhooks::{
     HttpRequest, compute_webhook_signature, json_str, json_u64, verify_timestamped_webhook,
@@ -101,11 +102,7 @@ pub(crate) fn handle_card_action(
     let Some(auth_tenant) = guard.authenticate(req) else {
         return err(401, "Unauthorized", "unauthorized");
     };
-    let tenant_secret = guard
-        .tenants
-        .get(&auth_tenant)
-        .map(|t| t.api_key.as_bytes().to_vec())
-        .unwrap_or_default();
+    let tenant_secret = derive_signing_secret(&auth_tenant);
     let header_sig = req
         .headers
         .get("x-sonaraim-signature")

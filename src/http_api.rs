@@ -28,8 +28,10 @@ use std::thread::{self, JoinHandle};
 pub struct TenantRecord {
     /// Tenant decentralized identifier (`did:sonaraim:...` or `did:web:...`).
     pub did: String,
-    /// Bearer API key assigned to the tenant.
+    /// Bearer API key assigned to the tenant (in-memory only, never persisted).
     pub api_key: String,
+    /// SHA-256 hash of the Bearer API key used for authentication lookups.
+    pub api_key_hash: String,
     /// Active SaaS subscription tier.
     pub tier: SaasPlanTier,
     /// Maximum operator seats included in the tier.
@@ -37,6 +39,29 @@ pub struct TenantRecord {
     /// Total promotional dispatch attempts tracked across all windows (observability only).
     pub promo_requests: u64,
     /// Start of the current in-memory fixed rate-limit window (`now_secs / window_secs`).
+    pub promo_window_start: u64,
+    /// Promotional attempts inside the current in-memory window.
+    pub promo_window_count: u64,
+    /// Total signed card action webhooks received.
+    pub card_actions: u64,
+    /// Total messages accepted for delivery.
+    pub messages_sent: u64,
+}
+
+/// Tenant counters restored from a hashed at-rest snapshot (no cleartext key).
+#[derive(Debug, Clone)]
+pub struct RestoredTenant {
+    /// Tenant decentralized identifier.
+    pub did: String,
+    /// SHA-256 hash of the Bearer API key.
+    pub api_key_hash: String,
+    /// Active SaaS subscription tier.
+    pub tier: SaasPlanTier,
+    /// Maximum operator seats included in the tier.
+    pub max_seats: u32,
+    /// Total promotional dispatch attempts across all windows.
+    pub promo_requests: u64,
+    /// Start of the current in-memory fixed rate-limit window.
     pub promo_window_start: u64,
     /// Promotional attempts inside the current in-memory window.
     pub promo_window_count: u64,
@@ -108,6 +133,7 @@ impl B2bState {
         let record = TenantRecord {
             did: did.to_string(),
             api_key: api_key.to_string(),
+            api_key_hash: crate::persistence::hash_credential(api_key),
             tier,
             max_seats,
             promo_requests: 0,
@@ -116,8 +142,28 @@ impl B2bState {
             card_actions: 0,
             messages_sent: 0,
         };
-        self.api_keys.insert(api_key.to_string(), did.to_string());
+        self.api_keys
+            .insert(record.api_key_hash.clone(), did.to_string());
         self.tenants.insert(did.to_string(), record);
+    }
+
+    /// Registers a tenant restored from a hashed snapshot (no cleartext key).
+    pub fn register_hashed_tenant(&mut self, restored: RestoredTenant) {
+        let record = TenantRecord {
+            did: restored.did.clone(),
+            api_key: String::new(),
+            api_key_hash: restored.api_key_hash.clone(),
+            tier: restored.tier,
+            max_seats: restored.max_seats,
+            promo_requests: restored.promo_requests,
+            promo_window_start: restored.promo_window_start,
+            promo_window_count: restored.promo_window_count,
+            card_actions: restored.card_actions,
+            messages_sent: restored.messages_sent,
+        };
+        self.api_keys
+            .insert(restored.api_key_hash, restored.did.clone());
+        self.tenants.insert(restored.did, record);
     }
 
     /// Registers an optional bootstrap tenant from environment values when both are non-empty.
@@ -133,7 +179,8 @@ impl B2bState {
     pub(crate) fn authenticate(&self, req: &HttpRequest) -> Option<String> {
         let auth = req.headers.get("authorization")?;
         let token = auth.strip_prefix("Bearer ").unwrap_or(auth).trim();
-        self.api_keys.get(token).cloned()
+        let digest = crate::persistence::hash_credential(token);
+        self.api_keys.get(&digest).cloned()
     }
 }
 
