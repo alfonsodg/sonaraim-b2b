@@ -243,10 +243,15 @@ pub fn handle_register_tenant(
             r#"{"error":"unauthorized_admin"}"#.to_string(),
         );
     }
+    // snake_case is primary (docs/API.md); camelCase aliases keep
+    // sonaraim-admin provisionB2bTenant (tenantDid/apiKey/seats) working.
     let did = json_str(&req.body, "tenant_did")
         .or_else(|| json_str(&req.body, "did"))
+        .or_else(|| json_str(&req.body, "tenantDid"))
         .unwrap_or_default();
-    let api_key = json_str(&req.body, "api_key").unwrap_or_default();
+    let api_key = json_str(&req.body, "api_key")
+        .or_else(|| json_str(&req.body, "apiKey"))
+        .unwrap_or_default();
     if did.trim().is_empty() || api_key.trim().is_empty() {
         return (
             400,
@@ -255,7 +260,10 @@ pub fn handle_register_tenant(
         );
     }
     let tier = parse_tier(&json_str(&req.body, "tier").unwrap_or_default());
-    let max_seats = json_u64(&req.body, "max_seats").unwrap_or(10) as u32;
+    let max_seats = json_u64(&req.body, "max_seats")
+        .or_else(|| json_u64(&req.body, "maxSeats"))
+        .or_else(|| json_u64(&req.body, "seats"))
+        .unwrap_or(10) as u32;
     guard.register_tenant(did.trim(), api_key.trim(), tier, max_seats);
     persist_if_configured(&guard);
     (
