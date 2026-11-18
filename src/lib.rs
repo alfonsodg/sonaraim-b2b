@@ -4,6 +4,7 @@
 //! 1-Click WhatsApp Business Cloud API template adapter, and Smart Fallback
 //! routing engine.
 
+pub mod ai_stream;
 pub mod billing;
 pub mod config;
 pub mod consent;
