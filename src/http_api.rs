@@ -34,8 +34,12 @@ pub struct TenantRecord {
     pub tier: SaasPlanTier,
     /// Maximum operator seats included in the tier.
     pub max_seats: u32,
-    /// Total promotional dispatch attempts tracked for rate limiting.
+    /// Total promotional dispatch attempts tracked across all windows (observability only).
     pub promo_requests: u64,
+    /// Start of the current in-memory fixed rate-limit window (`now_secs / window_secs`).
+    pub promo_window_start: u64,
+    /// Promotional attempts inside the current in-memory window.
+    pub promo_window_count: u64,
     /// Total signed card action webhooks received.
     pub card_actions: u64,
     /// Total messages accepted for delivery.
@@ -107,6 +111,8 @@ impl B2bState {
             tier,
             max_seats,
             promo_requests: 0,
+            promo_window_start: 0,
+            promo_window_count: 0,
             card_actions: 0,
             messages_sent: 0,
         };

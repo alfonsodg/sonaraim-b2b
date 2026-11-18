@@ -31,8 +31,8 @@ pub fn save_snapshot(state: &B2bState, path: &str) -> io::Result<()> {
     let mut out = String::new();
     for t in state.tenants.values() {
         out.push_str(&format!(
-            r#"{{"kind":"tenant","did":"{}","api_key":"{}","tier":"{}","max_seats":{},"promo_requests":{},"card_actions":{},"messages_sent":{}}}"#,
-            t.did, t.api_key, t.tier.as_str(), t.max_seats, t.promo_requests, t.card_actions, t.messages_sent
+            r#"{{"kind":"tenant","did":"{}","api_key":"{}","tier":"{}","max_seats":{},"promo_requests":{},"promo_window_start":{},"promo_window_count":{},"card_actions":{},"messages_sent":{}}}"#,
+            t.did, t.api_key, t.tier.as_str(), t.max_seats, t.promo_requests, t.promo_window_start, t.promo_window_count, t.card_actions, t.messages_sent
         ));
         out.push('\n');
     }
@@ -60,6 +60,8 @@ pub fn load_snapshot(state: &mut B2bState, path: &str) -> io::Result<()> {
                     state.register_tenant(&did, &api_key, tier, max_seats);
                     if let Some(rec) = state.tenants.get_mut(&did) {
                         rec.promo_requests = json_u64(line, "promo_requests").unwrap_or(0);
+                        rec.promo_window_start = json_u64(line, "promo_window_start").unwrap_or(0);
+                        rec.promo_window_count = json_u64(line, "promo_window_count").unwrap_or(0);
                         rec.card_actions = json_u64(line, "card_actions").unwrap_or(0);
                         rec.messages_sent = json_u64(line, "messages_sent").unwrap_or(0);
                     }
@@ -141,8 +143,52 @@ pub fn handle_register_tenant(
     )
 }
 
-/// Executes a Redis RESP `INCR` command over TCP and returns `Some(count <= limit)`.
+/// Executes a Redis RESP `INCR` + `EXPIRE` fixed-window check over TCP.
+/// Returns `Some(count <= limit)` on success, recording failures for operators.
+///
+/// The counter key carries a 1-second TTL set via `EXPIRE` so the window
+/// resets in real time instead of accumulating forever. On any I/O or RESP
+/// error the failure is recorded (retrievable via
+/// [`last_redis_rate_limit_error`]) and `None` is returned so callers can
+/// fail open while remaining observable.
 pub fn check_redis_rate_limit(redis_url: &str, key: &str, limit: u64) -> Option<bool> {
+    check_redis_rate_limit_with_window(redis_url, key, limit, 1)
+}
+
+/// Records the most recent Redis rate-limiter failure for operator visibility.
+static REDIS_RATE_LIMIT_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Returns and clears the last recorded Redis rate-limiter error, if any.
+pub fn last_redis_rate_limit_error() -> Option<String> {
+    REDIS_RATE_LIMIT_ERROR.lock().ok()?.take()
+}
+
+/// Records a Redis rate-limiter failure message for operator visibility.
+fn record_redis_rate_limit_error(message: String) {
+    if let Ok(mut slot) = REDIS_RATE_LIMIT_ERROR.lock() {
+        *slot = Some(message);
+    }
+    eprintln!(
+        "{{\"level\":\"WARN\",\"service\":\"sonaraim-b2b\",\"component\":\"promo_rate_limiter\",\"error\":\"redis_unavailable\"}}"
+    );
+}
+
+/// Executes a Redis RESP `INCR` + `EXPIRE key window_secs` fixed-window check.
+pub fn check_redis_rate_limit_with_window(
+    redis_url: &str,
+    key: &str,
+    limit: u64,
+    window_secs: u64,
+) -> Option<bool> {
+    let outcome = check_redis_once(redis_url, key, limit, window_secs.max(1));
+    if outcome.is_none() {
+        record_redis_rate_limit_error(format!("redis_unavailable key={key}"));
+    }
+    outcome
+}
+
+/// Single-attempt `INCR` + `EXPIRE` round trip against a `redis://` endpoint.
+fn check_redis_once(redis_url: &str, key: &str, limit: u64, window_secs: u64) -> Option<bool> {
     let stripped = redis_url
         .trim()
         .strip_prefix("redis://")
@@ -152,18 +198,50 @@ pub fn check_redis_rate_limit(redis_url: &str, key: &str, limit: u64) -> Option<
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(150)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
-    let cmd = format!("*2\r\n$4\r\nINCR\r\n${}\r\n{key}\r\n", key.len());
-    stream.write_all(cmd.as_bytes()).ok()?;
+    let incr = format!("*2\r\n$4\r\nINCR\r\n${}\r\n{key}\r\n", key.len());
+    stream.write_all(incr.as_bytes()).ok()?;
     stream.flush().ok()?;
     let mut buf = [0u8; 128];
     let n = stream.read(&mut buf).ok()?;
-    let reply = String::from_utf8_lossy(&buf[..n]);
-    let digits: String = reply
+    let count: u64 = String::from_utf8_lossy(&buf[..n])
         .trim_start_matches(':')
         .chars()
         .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse::<u64>().ok().map(|c| c <= limit)
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    // Best-effort TTL so the fixed window resets; a failed EXPIRE still
+    // counts this attempt but is reported via the error slot below.
+    let expire = format!(
+        "*3\r\n$6\r\nEXPIRE\r\n${}\r\n{key}\r\n${}\r\n{window_secs}\r\n",
+        key.len(),
+        window_secs.to_string().len()
+    );
+    if stream.write_all(expire.as_bytes()).is_err() {
+        return None;
+    }
+    let _ = stream.flush();
+    let mut ack = [0u8; 64];
+    let _ = stream.read(&mut ack);
+    Some(count <= limit)
+}
+
+/// Returns the test-only wall-clock offset in seconds (`B2B_TEST_NOW_OFFSET_SECS`).
+fn test_now_offset_secs() -> u64 {
+    std::env::var("B2B_TEST_NOW_OFFSET_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Returns the configured promotional rate-limit window in seconds
+/// (`B2B_PROMO_WINDOW_SECS`, default `1`).
+pub fn promo_window_secs() -> u64 {
+    std::env::var("B2B_PROMO_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(1)
 }
 
 /// Enforces promotional rate limits and `ConsentGate` token validation for a tenant dispatch.
@@ -174,13 +252,25 @@ pub(crate) fn authorize_promo(
     consent_sig: Option<String>,
 ) -> Option<(u16, &'static str, String)> {
     let limit = guard.config.promo_rate_limit_rps as u64;
+    let window_secs = promo_window_secs();
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .saturating_add(test_now_offset_secs());
+    let window_key = format!("b2b:promo:{tenant_did}:{w}", w = now_secs / window_secs);
     let redis_ok = guard
         .redis_url
         .as_deref()
-        .and_then(|u| check_redis_rate_limit(u, &format!("b2b:promo:{tenant_did}"), limit));
+        .and_then(|u| check_redis_rate_limit_with_window(u, &window_key, limit, window_secs));
     if let Some(tenant) = guard.tenants.get_mut(tenant_did) {
-        tenant.promo_requests += 1;
-        if redis_ok == Some(false) || tenant.promo_requests > limit {
+        if tenant.promo_window_start != now_secs / window_secs {
+            tenant.promo_window_start = now_secs / window_secs;
+            tenant.promo_window_count = 0;
+        }
+        tenant.promo_window_count = tenant.promo_window_count.saturating_add(1);
+        tenant.promo_requests = tenant.promo_requests.saturating_add(1);
+        if redis_ok == Some(false) || tenant.promo_window_count > limit {
             return Some((
                 429,
                 "Too Many Requests",
