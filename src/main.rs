@@ -21,6 +21,10 @@ fn main() {
             let storage_path = cfg.storage_path.clone();
             let mut state = B2bState::new(cfg);
             state.set_storage_path(&storage_path);
+            // Durable async delivery backlog next to the state snapshot; the
+            // drain worker (run_server) retries with backoff+jitter and
+            // dead-letters exhausted jobs (b2b#23).
+            sonaraim_b2b::delivery_wiring::enable_delivery_queue_from_storage(&mut state, 5);
             state.register_bootstrap_tenant(
                 std::env::var("B2B_BOOTSTRAP_TENANT_DID").ok().as_deref(),
                 std::env::var("B2B_BOOTSTRAP_API_KEY").ok().as_deref(),
