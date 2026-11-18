@@ -88,7 +88,7 @@ The following ASCII diagram illustrates the inbound enterprise bridging, WhatsAp
 | `GET` | `/health` | Health and upstream node connectivity status |
 | `GET` | `/metrics` | Prometheus metrics scrape endpoint |
 | `POST` | `/v1/tenants` | Dynamic enterprise tenant registration |
-| `POST` | `/v1/tenants/rotate-key` | Rotate tenant Ed25519 signing keys |
+| `POST` | `/v1/tenants/rotate-key` | Rotate tenant Bearer API key |
 | `POST` | `/v1/messages` | Dispatch E2EE message or declarative card |
 | `POST` | `/v1/cards/actions` | Inbound signed user card action callback |
 | `POST` | `/v1/consents/revoke` | Revoke user promotional consent token |
