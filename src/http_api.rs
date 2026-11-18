@@ -4,6 +4,7 @@
 use crate::billing::SaasPlanTier;
 use crate::config::B2bConfig;
 use crate::consent::MessageCategory;
+use crate::delivery_queue::DeliveryQueue;
 use crate::fallback::{DeliveryRoute, SmartFallbackEngine};
 use crate::outbound_dispatcher::{forward_to_node_relay, start_ai_stream_listener};
 use crate::persistence::{
@@ -88,6 +89,11 @@ pub struct B2bState {
     pub admin_key: Option<String>,
     /// Optional Redis URL for distributed promotional rate limiting.
     pub redis_url: Option<String>,
+    /// Optional async delivery queue (durable jobs + dead-letter) shared by
+    /// the live routes. `None` until [`crate::delivery_wiring::enable_delivery_queue`].
+    /// Held behind `Arc<Mutex<..>>` so the background drain worker and the
+    /// request handlers share one backlog (`Arc` keeps [`B2bState`] `Clone`).
+    pub delivery_queue: Option<std::sync::Arc<std::sync::Mutex<DeliveryQueue>>>,
     /// Optional pluggable AI inference backend URL (`B2B_AI_BACKEND_URL`).
     pub ai_backend_url: Option<String>,
     /// Inference model name sent to the backend (`B2B_AI_MODEL`).
@@ -116,6 +122,7 @@ impl B2bState {
             redis_url: std::env::var("REDIS_URL")
                 .ok()
                 .or_else(|| std::env::var("B2B_REDIS_URL").ok()),
+            delivery_queue: None,
         }
     }
 
@@ -216,6 +223,7 @@ pub fn start_test_server(state: B2bState) -> Result<(String, JoinHandle<()>), io
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?.to_string();
     let shared = Arc::new(Mutex::new(state));
+    crate::delivery_wiring::spawn_delivery_worker(Arc::clone(&shared));
     let handle = thread::spawn(move || serve_loop(listener, shared));
     Ok((addr, handle))
 }
@@ -227,6 +235,7 @@ pub fn run_server(state: B2bState) -> Result<(), io::Error> {
     let listener = TcpListener::bind(addr)?;
     let shared = Arc::new(Mutex::new(state));
     let _ = start_ai_stream_listener(&grpc_host, grpc_port, Arc::clone(&shared));
+    crate::delivery_wiring::spawn_delivery_worker(Arc::clone(&shared));
     serve_loop(listener, shared);
     Ok(())
 }
@@ -350,19 +359,38 @@ fn handle_dispatch_message(
         seq = tenant.messages_sent;
     }
     persist_if_configured(&guard);
+    let delivery_id = crate::delivery_wiring::new_delivery_id();
     drop(guard);
     match route {
         DeliveryRoute::NativeMlsE2ee {
             node_rpc_url,
             recipient_did,
         } => {
+            // Durable intent first: enqueue the relay envelope (when the
+            // queue is enabled) so a crash after the 202 never loses the
+            // delivery. The fast path below attempts immediate dispatch and
+            // drops the queued intent on success (exactly-once).
+            let queued_id = if let Ok(guard) = shared.lock() {
+                crate::delivery_wiring::enqueue_delivery(
+                    &guard,
+                    &format!("{}/v1/relay/envelopes", node_rpc_url.trim_end_matches('/')),
+                    vec![],
+                    &req.body,
+                )
+            } else {
+                None
+            };
+            let effective_id = queued_id.as_deref().unwrap_or(&delivery_id);
             let relayed =
                 forward_to_node_relay(&node_rpc_url, &tenant_did, &recipient_did, seq, &req.body);
+            if relayed && let Ok(guard) = shared.lock() {
+                crate::delivery_wiring::confirm_delivered(&guard, effective_id);
+            }
             (
                 202,
                 "Accepted",
                 format!(
-                    r#"{{"status":"queued","route":"NATIVE_MLS_E2EE","recipient":"{recipient}","relayed":{relayed}}}"#
+                    r#"{{"status":"queued","delivery_id":"{effective_id}","route":"NATIVE_MLS_E2EE","recipient":"{recipient}","relayed":{relayed}}}"#
                 ),
             )
         }
@@ -370,7 +398,7 @@ fn handle_dispatch_message(
             202,
             "Accepted",
             format!(
-                r#"{{"status":"queued","route":"SMART_FALLBACK_INSTANT_CLIP","magic_link":"{magic_link_url}"}}"#
+                r#"{{"status":"queued","delivery_id":"{delivery_id}","route":"SMART_FALLBACK_INSTANT_CLIP","magic_link":"{magic_link_url}"}}"#
             ),
         ),
     }

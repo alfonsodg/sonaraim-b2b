@@ -68,6 +68,19 @@ impl DeliveryQueue {
         self.persist_queue();
     }
 
+    /// Removes a pending job by id (e.g. after a synchronous fast-path
+    /// delivery succeeded) and persists the backlog. Returns `true` when a
+    /// job was removed.
+    pub fn remove_job(&mut self, id: &str) -> bool {
+        let before = self.pending_jobs.len();
+        self.pending_jobs.retain(|job| job.id != id);
+        let removed = self.pending_jobs.len() != before;
+        if removed {
+            self.persist_queue();
+        }
+        removed
+    }
+
     /// Number of jobs awaiting delivery.
     pub fn pending(&self) -> usize {
         self.pending_jobs.len()
@@ -143,14 +156,20 @@ impl DeliveryQueue {
     }
 
     /// Persists the pending backlog atomically (tmp + rename).
+    ///
+    /// Bodies, headers, and URLs are hex-encoded so arbitrary JSON payloads
+    /// (quotes, newlines, unicode) round-trip through `reload` intact. The
+    /// pre-remediation `body_len`/`url` shape still loads (bodies empty), so
+    /// older queue files degrade to retry-with-empty-body instead of failing.
     fn persist_queue(&self) {
         let mut out = String::new();
-        for job in &self.pending_jobs {
+        for job in &pending_jobs_sorted(&self.pending_jobs) {
             out.push_str(&format!(
-                r#"{{"job_id":"{}","url":"{}","body_len":{},"attempts":{}}}"#,
+                r#"{{"job_id":"{}","url_hex":"{}","headers_hex":"{}","body_hex":"{}","attempts":{}}}"#,
                 job.id,
-                job.url,
-                job.body.len(),
+                crate::webhooks::encode_hex(job.url.as_bytes()),
+                encode_headers(&job.headers),
+                crate::webhooks::encode_hex(job.body.as_bytes()),
                 job.attempts
             ));
             out.push('\n');
@@ -178,22 +197,81 @@ impl DeliveryQueue {
         Ok(())
     }
 
-    /// Reloads the pending backlog length from disk (bodies re-fetched by producers).
+    /// Reloads the pending backlog from disk, restoring full bodies and
+    /// headers (hex-decoded). Pre-remediation files carrying only `url` +
+    /// `body_len` still load with empty bodies/headers.
     fn reload(&mut self) {
         if let Ok(content) = std::fs::read_to_string(&self.queue_path) {
             self.pending_jobs = content
                 .lines()
                 .filter(|l| !l.trim().is_empty())
                 .filter_map(|l| {
+                    let id = crate::webhooks::json_str(l, "job_id")?;
+                    let url = match crate::webhooks::json_str(l, "url_hex") {
+                        Some(hex) => {
+                            let bytes = crate::webhooks::decode_hex(&hex)?;
+                            String::from_utf8(bytes).ok()?
+                        }
+                        None => crate::webhooks::json_str(l, "url")?,
+                    };
+                    let headers = crate::webhooks::json_str(l, "headers_hex")
+                        .map(|hex| decode_headers(&hex))
+                        .unwrap_or_default();
+                    let body = match crate::webhooks::json_str(l, "body_hex") {
+                        Some(hex) => {
+                            let bytes = crate::webhooks::decode_hex(&hex)?;
+                            String::from_utf8(bytes).ok()?
+                        }
+                        None => String::new(),
+                    };
                     Some(DeliveryJob {
-                        id: crate::webhooks::json_str(l, "job_id")?,
-                        url: crate::webhooks::json_str(l, "url")?,
-                        headers: Vec::new(),
-                        body: String::new(),
+                        id,
+                        url,
+                        headers,
+                        body,
                         attempts: crate::webhooks::json_u64(l, "attempts").unwrap_or(0) as u32,
                     })
                 })
                 .collect();
         }
     }
+}
+
+/// Encodes headers as `hex(name):hex(value)` pairs joined by `,`
+/// (`,`/`:` never appear in hex output, so the encoding is unambiguous).
+fn encode_headers(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}:{}",
+                crate::webhooks::encode_hex(k.as_bytes()),
+                crate::webhooks::encode_hex(v.as_bytes())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Decodes the [`encode_headers`] format back into header pairs.
+fn decode_headers(hex: &str) -> Vec<(String, String)> {
+    let hex = hex.trim();
+    if hex.is_empty() {
+        return Vec::new();
+    }
+    hex.split(',')
+        .filter_map(|pair| {
+            let (k_hex, v_hex) = pair.split_once(':')?;
+            let k = String::from_utf8(crate::webhooks::decode_hex(k_hex)?).ok()?;
+            let v = String::from_utf8(crate::webhooks::decode_hex(v_hex)?).ok()?;
+            Some((k, v))
+        })
+        .collect()
+}
+
+/// Returns pending jobs in stable id order for deterministic queue files.
+fn pending_jobs_sorted(jobs: &[DeliveryJob]) -> Vec<&DeliveryJob> {
+    let mut sorted: Vec<&DeliveryJob> = jobs.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    sorted
 }

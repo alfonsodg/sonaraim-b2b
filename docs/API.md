@@ -11,10 +11,39 @@ Tenant-scoped routes additionally require the `{did}` path segment to match
 the authenticated tenant (`403 forbidden_tenant_mismatch` otherwise).
 
 ```http
-Authorization: Bearer <B2B_API_KEY>
+Authorization: Bearer <tenant-api-key>
 X-Sonaraim-Signature: sha256=<hex-hmac>
 X-Sonaraim-Admin-Key: <B2B_KMS_MASTER_KEY>
 ```
+
+Tenant Bearer tokens are the per-tenant `api_key` values provisioned via
+`POST /v1/tenants` (there is no `B2B_API_KEY` environment variable).
+
+Credentials at rest are SHA-256 hashes (`api_key_sha256`); the cleartext
+Bearer key never reaches disk. Webhook signatures use a separate derived
+per-tenant HMAC secret (`B2B_KMS_MASTER_KEY`, `persistence::derive_signing_secret`),
+cryptographically separated from the Bearer key.
+
+### Signing-secret migration window (dual-accept)
+
+Card-action webhooks accept **two** signature schemes during the migration
+window opened by the credential-hashing change (b2b#22):
+
+- **Modern (required for new signers):** `X-Sonaraim-Signature: sha256=<hex>`
+  where `<hex>` is HMAC-SHA256 over the exact request body with the derived
+  per-tenant secret.
+- **Legacy (deprecated, accepted with a logged warning):** the pre-hashing
+  payload-only FNV-1a signature `sha256=<16 hex chars>`. Both schemes enforce
+  the same `webhook_timestamp` replay window.
+
+Rationale: the secret upgrade changed what external signers must compute, so
+rejecting legacy signatures outright would brick existing integrations.
+The legacy path is a narrow equality check against the historical algorithm
+(no generic bypass) and is logged per acceptance
+(`legacy_webhook_signature_accepted_migrate_to_derived_hmac`) so operators can
+track remaining legacy signers before the window closes. A `B2B_KMS_MASTER_KEY`
+rotation likewise warns (`signing_secret_mismatch_after_kms_change`) instead of
+refusing to load tenants.
 
 For tenant administration endpoints (`POST /v1/tenants`), the
 `X-Sonaraim-Admin-Key` header must equal `B2B_KMS_MASTER_KEY`.
@@ -162,11 +191,20 @@ fixed-window rate limiter (`B2B_PROMO_RATE_LIMIT_RPS` per
 }
 ```
 
+Live routes enqueue durable delivery jobs and return a `delivery_id`
+for tracing. The request handler attempts immediate dispatch (fast path) and
+drops the queued intent on success (exactly-once); on failure the background
+worker retries with exponential backoff plus jitter and dead-letters exhausted
+jobs to `<storage>.dead-letter.jsonl`. The queue backlog persists in
+`<storage>.queue.jsonl` with full bodies and headers, so pending jobs survive
+restarts.
+
 **Response (`202 Accepted`, native route)**:
 
 ```json
 {
   "status": "queued",
+  "delivery_id": "dlv_1700000000000000000_1234",
   "route": "NATIVE_MLS_E2EE",
   "recipient": "did:sonaraim:alice",
   "relayed": true
@@ -204,10 +242,16 @@ Inbound webhook invoked when a user executes an action inside a
 
 **Response (`200 OK`)**:
 
+When a `callback_url` is present, the signed callback is enqueued as a
+durable delivery job (same worker/backoff/dead-letter contract as
+`POST /v1/messages`) and its id is returned as `delivery_id`; the immediate
+dispatch outcome stays visible as `webhook_delivered`.
+
 ```json
 {
   "status": "recorded",
   "verified": true,
+  "delivery_id": "dlv_1700000000000000000_1234",
   "webhook_delivered": true,
   "X-Sonaraim-Signature": "sha256=4a5b6c7d8e..."
 }
@@ -349,7 +393,12 @@ from the pluggable HTTP backend (`B2B_AI_BACKEND_URL`, `B2B_AI_MODEL`).
 - **`crm_connectors`**: Ingests and normalizes Chatwoot, Zendesk, HubSpot, and Salesforce events.
 - **`billing::SaasPlanTier`**: Subscription tiers (`free`, `smb_pro`, `enterprise_sovereign`) and take-rate helpers.
 - **`persistence`**: Hashed-credential JSONL snapshots, atomic writes, and tenant provisioning handlers.
+  Re-saving a restored state is idempotent (stored hashes are written back verbatim).
+  Pre-hashing legacy snapshots (cleartext `api_key`, no checksum) migrate on first
+  load with a logged count; truncated files still fail closed.
 - **`rate_limit`**: Fixed-window promotional limiter (`INCR` + `EXPIRE`) with visible Redis errors.
 - **`delivery_queue::DeliveryQueue`**: Durable async delivery backlog with backoff and dead-letter file.
+- **`delivery_wiring`**: Live-route wiring - durable enqueue, exactly-once fast-path confirmation, background drain worker.
+- **`snapshot_migrate`**: First-load migration of pre-hashing legacy snapshots into the hashed format.
 - **`ai_stream`**: Pluggable inference deltas for the TCP/JSON stream.
 - **`webhooks`**: Replay-window verification and HMAC signature helpers.

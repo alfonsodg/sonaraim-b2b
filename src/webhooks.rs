@@ -166,6 +166,26 @@ pub fn verify_timestamped_webhook(
     verify_webhook_signature(secret, &body_str, sig_header)
 }
 
+/// Decodes a lowercase hexadecimal string into bytes.
+///
+/// Returns `None` when the input has odd length or non-hex digits.
+pub fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    let hex = hex.trim();
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = hex_val(bytes[i])?;
+        let lo = hex_val(bytes[i + 1])?;
+        out.push(hi * 16 + lo);
+        i += 2;
+    }
+    Some(out)
+}
+
 /// Encodes a byte slice as a lowercase hexadecimal string.
 pub fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -174,4 +194,86 @@ pub fn encode_hex(bytes: &[u8]) -> String {
         let _ = write!(&mut out, "{b:02x}");
     }
     out
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Computes the legacy (pre-`#22`) payload-only FNV-1a 64-bit webhook signature.
+///
+/// Before credential hashing, card-action webhooks were signed with an FNV-1a
+/// hash of the payload alone (no per-tenant secret). Kept ONLY for the
+/// dual-accept migration window: external signers that have not rotated to the
+/// derived HMAC secret keep verifying until the window closes (see
+/// `docs/API.md`). New signers MUST use [`compute_webhook_signature`].
+pub fn compute_legacy_webhook_signature(payload: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in payload.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("sha256={hash:016x}")
+}
+
+/// Validates an incoming signature against the legacy payload-only FNV scheme.
+pub fn verify_legacy_webhook_signature(payload: &str, provided: &str) -> bool {
+    let trimmed = provided.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let expected = compute_legacy_webhook_signature(payload);
+    constant_time_eq(trimmed.as_bytes(), expected.as_bytes())
+}
+
+/// Outcome of card-action webhook authentication across the dual-accept window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookAuth {
+    /// Signature verified with the current derived per-tenant HMAC secret.
+    Modern,
+    /// Signature verified with the legacy payload-only scheme (deprecated).
+    Legacy,
+    /// No scheme verified.
+    Invalid,
+}
+
+/// Authenticates a card-action webhook body with timestamp replay protection,
+/// accepting both the current derived HMAC secret and — during the migration
+/// window — the legacy payload-only signature.
+///
+/// The caller logs a deprecation warning on [`WebhookAuth::Legacy`] and must
+/// reject [`WebhookAuth::Invalid`]. The legacy path still enforces the same
+/// timestamp replay window; only the signature scheme differs.
+pub fn authenticate_card_action(
+    secret: &[u8],
+    payload: &[u8],
+    timestamp_secs: u64,
+    now_secs: u64,
+    max_skew_secs: u64,
+    sig_header: &str,
+) -> WebhookAuth {
+    if verify_timestamped_webhook(
+        secret,
+        timestamp_secs,
+        now_secs,
+        max_skew_secs,
+        payload,
+        sig_header,
+    ) {
+        return WebhookAuth::Modern;
+    }
+    if now_secs.abs_diff(timestamp_secs) > max_skew_secs {
+        return WebhookAuth::Invalid;
+    }
+    let body_str = String::from_utf8_lossy(payload);
+    if verify_legacy_webhook_signature(&body_str, sig_header) {
+        WebhookAuth::Legacy
+    } else {
+        WebhookAuth::Invalid
+    }
 }

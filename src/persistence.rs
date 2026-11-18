@@ -55,9 +55,11 @@ fn signing_secret_hex(tenant_did: &str) -> String {
 ///
 /// Credentials at rest are SHA-256 hashes (`api_key_sha256`) plus a distinct
 /// signing-secret hash (`signing_secret_sha256`); the cleartext Bearer key
-/// never reaches disk. Writes are atomic: content lands in `<path>.tmp`
-/// (with fsync) and is renamed over `<path>`, followed by a SHA-256
-/// integrity line (`kind: checksum`) verified on load.
+/// never reaches disk. Re-saving a restored state is idempotent: restored
+/// records carry no cleartext key, so the stored hash is written back
+/// verbatim instead of hashing the empty string (b2b#22). Writes are atomic:
+/// content lands in `<path>.tmp` (with fsync) and is renamed over `<path>`,
+/// followed by a SHA-256 integrity line (`kind: checksum`) verified on load.
 pub fn save_snapshot(state: &B2bState, path: &str) -> io::Result<()> {
     if let Some(parent) = Path::new(path).parent()
         && !parent.as_os_str().is_empty()
@@ -66,10 +68,18 @@ pub fn save_snapshot(state: &B2bState, path: &str) -> io::Result<()> {
     }
     let mut out = String::new();
     for t in state.tenants.values() {
+        // Restored records hold `api_key == ""` (no cleartext in memory);
+        // persist the stored hash verbatim so load→save→reload keeps the
+        // same Bearer lookup. Only fresh/rotated records hash cleartext.
+        let key_hash = if t.api_key.trim().is_empty() {
+            t.api_key_hash.clone()
+        } else {
+            hash_credential(&t.api_key)
+        };
         out.push_str(&format!(
             r#"{{"kind":"tenant","did":"{}","api_key_sha256":"{}","signing_secret_sha256":"{}","tier":"{}","max_seats":{},"promo_requests":{},"promo_window_start":{},"promo_window_count":{},"card_actions":{},"messages_sent":{}}}"#,
             t.did,
-            hash_credential(&t.api_key),
+            key_hash,
             signing_secret_hex(&t.did),
             t.tier.as_str(),
             t.max_seats,
@@ -111,12 +121,30 @@ pub fn save_snapshot(state: &B2bState, path: &str) -> io::Result<()> {
 /// with an `InvalidData` error and leaves `state` untouched. Stored
 /// `api_key_sha256` hashes are registered directly into the hashed lookup
 /// table so Bearer auth keeps working without the cleartext key.
+///
+/// Pre-`#22` legacy snapshots (cleartext `api_key`, no `checksum` line) are
+/// migrated instead of rejected: each cleartext key is hashed on first load
+/// and the migration count is logged. Legacy files carry no integrity tag,
+/// so their content is trusted as-is exactly once — the very next save
+/// writes the hashed format with a checksum.
 pub fn load_snapshot(state: &mut B2bState, path: &str) -> io::Result<()> {
     if !Path::new(path).exists() {
         return Ok(());
     }
     let content = fs::read_to_string(path)?;
-    load_snapshot_str(state, &content)
+    let non_empty: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let has_checksum = non_empty
+        .last()
+        .is_some_and(|last| json_str(last, "kind").as_deref() == Some("checksum"));
+    if has_checksum {
+        load_snapshot_str(state, &content)
+    } else {
+        crate::snapshot_migrate::load_legacy_snapshot_str(state, &content)
+    }
 }
 
 /// Parses and validates snapshot content, failing closed on checksum mismatch.
@@ -169,10 +197,12 @@ fn load_snapshot_str(state: &mut B2bState, content: &str) -> io::Result<()> {
                     != json_str(line, "signing_secret_sha256").unwrap_or_default()
                     && json_str(line, "signing_secret_sha256").is_some()
                 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "snapshot signing secret mismatch",
-                    ));
+                    // A `B2B_KMS_MASTER_KEY` rotation changes the derived
+                    // secret: warn loudly but keep serving (the Bearer lookup
+                    // is unaffected) instead of bricking every tenant (b2b#22).
+                    eprintln!(
+                        "{{\"level\":\"WARN\",\"service\":\"sonaraim-b2b\",\"component\":\"persistence\",\"tenant_did\":\"{did}\",\"error\":\"signing_secret_mismatch_after_kms_change\"}}"
+                    );
                 }
                 tenants.push(crate::http_api::RestoredTenant {
                     did,
@@ -245,8 +275,11 @@ pub fn handle_register_tenant(
     }
     let did = json_str(&req.body, "tenant_did")
         .or_else(|| json_str(&req.body, "did"))
+        .or_else(|| json_str(&req.body, "tenantDid"))
         .unwrap_or_default();
-    let api_key = json_str(&req.body, "api_key").unwrap_or_default();
+    let api_key = json_str(&req.body, "api_key")
+        .or_else(|| json_str(&req.body, "apiKey"))
+        .unwrap_or_default();
     if did.trim().is_empty() || api_key.trim().is_empty() {
         return (
             400,
@@ -255,7 +288,10 @@ pub fn handle_register_tenant(
         );
     }
     let tier = parse_tier(&json_str(&req.body, "tier").unwrap_or_default());
-    let max_seats = json_u64(&req.body, "max_seats").unwrap_or(10) as u32;
+    let max_seats = json_u64(&req.body, "max_seats")
+        .or_else(|| json_u64(&req.body, "maxSeats"))
+        .or_else(|| json_u64(&req.body, "seats"))
+        .unwrap_or(10) as u32;
     guard.register_tenant(did.trim(), api_key.trim(), tier, max_seats);
     persist_if_configured(&guard);
     (

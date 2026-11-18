@@ -10,8 +10,8 @@ use crate::outbound_dispatcher::{
 use crate::persistence::derive_signing_secret;
 use crate::url_validator::validate_callback_url;
 use crate::webhooks::{
-    HttpRequest, compute_webhook_signature, json_str, json_u64, verify_timestamped_webhook,
-    verify_webhook_signature,
+    HttpRequest, WebhookAuth, authenticate_card_action, compute_webhook_signature, json_str,
+    json_u64,
 };
 use crate::whatsapp_adapter::{WhatsAppCloudAdapter, WhatsAppTemplateRequest};
 use std::sync::{Arc, Mutex};
@@ -62,18 +62,34 @@ pub(crate) fn handle_whatsapp_compat(
     match WhatsAppCloudAdapter::translate(&wa_req) {
         Ok(card) => {
             let card_json = card.to_json();
+            let queued_id = if let Ok(guard) = shared.lock() {
+                crate::delivery_wiring::enqueue_delivery(
+                    &guard,
+                    &format!("{}/v1/relay/envelopes", node_rpc_url.trim_end_matches('/')),
+                    vec![],
+                    &card_json,
+                )
+            } else {
+                None
+            };
             let relayed =
                 forward_to_node_relay(&node_rpc_url, &tenant_did, &recipient_did, seq, &card_json);
+            if relayed && let (Some(id), Ok(guard)) = (queued_id.as_ref(), shared.lock()) {
+                crate::delivery_wiring::confirm_delivered(&guard, id);
+            }
             let synced = sync_optional_upstream(
                 json_str(&req.body, "upstream_url"),
                 "B2B_WHATSAPP_UPSTREAM_URL",
                 &req.body,
             );
+            let delivery_field = queued_id
+                .map(|id| format!(r#""delivery_id":"{id}","#))
+                .unwrap_or_default();
             (
                 200,
                 "OK",
                 format!(
-                    r#"{{"messaging_product":"sonaraim","format":"SONARAIM_CARD","recipient":"{}","title":"{}","upstream_synced":{synced},"relayed":{relayed}}}"#,
+                    r#"{{"messaging_product":"sonaraim","format":"SONARAIM_CARD","recipient":"{}","title":"{}","upstream_synced":{synced},{delivery_field}"relayed":{relayed}}}"#,
                     card.recipient, card.title
                 ),
             )
@@ -109,9 +125,6 @@ pub(crate) fn handle_card_action(
         .cloned()
         .unwrap_or_default();
     let user_sig = json_str(&req.body, "user_signature").unwrap_or(header_sig);
-    if !verify_webhook_signature(&tenant_secret, &req.body, &user_sig) {
-        return err(401, "Unauthorized", "invalid_signature");
-    }
     let Some(ts) = json_u64(&req.body, "webhook_timestamp") else {
         return err(400, "Bad Request", "missing_webhook_timestamp");
     };
@@ -119,15 +132,34 @@ pub(crate) fn handle_card_action(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if !verify_timestamped_webhook(
+    // Dual-accept window (b2b#22): the derived HMAC secret is current; the
+    // legacy payload-only signature still verifies with a logged deprecation
+    // so the secret upgrade does not brick external signers.
+    match authenticate_card_action(
         &tenant_secret,
+        req.body.as_bytes(),
         ts,
         now_secs,
         webhook_replay_window_secs(),
-        req.body.as_bytes(),
         &user_sig,
     ) {
-        return err(403, "Forbidden", "stale_webhook_timestamp");
+        WebhookAuth::Invalid => {
+            // A verifiable-but-stale signature stays a 403 (replay), anything
+            // else is a 401 (forgery).
+            let verifiable =
+                crate::webhooks::verify_webhook_signature(&tenant_secret, &req.body, &user_sig)
+                    || crate::webhooks::verify_legacy_webhook_signature(&req.body, &user_sig);
+            if verifiable {
+                return err(403, "Forbidden", "stale_webhook_timestamp");
+            }
+            return err(401, "Unauthorized", "invalid_signature");
+        }
+        WebhookAuth::Legacy => {
+            eprintln!(
+                "{{\"level\":\"WARN\",\"service\":\"sonaraim-b2b\",\"component\":\"card_actions\",\"tenant_did\":\"{auth_tenant}\",\"note\":\"legacy_webhook_signature_accepted_migrate_to_derived_hmac\"}}"
+            );
+        }
+        WebhookAuth::Modern => {}
     }
     if let Some(body_tenant) = json_str(&req.body, "tenant_did")
         && !body_tenant.trim().is_empty()
@@ -147,25 +179,41 @@ pub(crate) fn handle_card_action(
         tenant.card_actions += 1;
     }
     crate::persistence::persist_if_configured(&guard);
-    drop(guard);
+    // Durable callback intent first (when the queue is enabled); the fast
+    // path below attempts immediate dispatch and drops the queued intent on
+    // success (exactly-once). The outcome stays visible in the response.
     let webhook_sig = compute_webhook_signature(&tenant_secret, &req.body);
-    let delivered = callback_url.is_some_and(|url| {
-        matches!(
-            post_json_with_retry(
-                &url,
-                &[("X-Sonaraim-Signature", &webhook_sig)],
-                &req.body,
-                configured_timeout_ms(),
-                2,
-            ),
-            Ok(st) if (200..300).contains(&st)
+    let delivery_id = callback_url.as_deref().and_then(|url| {
+        crate::delivery_wiring::enqueue_delivery(
+            &guard,
+            url,
+            vec![("X-Sonaraim-Signature".to_string(), webhook_sig.clone())],
+            &req.body,
         )
     });
+    drop(guard);
+    let delivered = callback_url.is_some_and(|url| {
+        let outcome = post_json_with_retry(
+            &url,
+            &[("X-Sonaraim-Signature", &webhook_sig)],
+            &req.body,
+            configured_timeout_ms(),
+            2,
+        );
+        let ok = matches!(outcome, Ok(st) if (200..300).contains(&st));
+        if ok && let (Some(id), Ok(guard)) = (delivery_id.as_ref(), shared.lock()) {
+            crate::delivery_wiring::confirm_delivered(&guard, id);
+        }
+        ok
+    });
+    let delivery_field = delivery_id
+        .map(|id| format!(r#""delivery_id":"{id}","#))
+        .unwrap_or_default();
     (
         200,
         "OK",
         format!(
-            r#"{{"status":"recorded","verified":true,"webhook_delivered":{delivered},"X-Sonaraim-Signature":"{webhook_sig}"}}"#
+            r#"{{"status":"recorded","verified":true,{delivery_field}"webhook_delivered":{delivered},"X-Sonaraim-Signature":"{webhook_sig}"}}"#
         ),
     )
 }
