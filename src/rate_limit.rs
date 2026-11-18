@@ -7,11 +7,11 @@ use std::time::Duration;
 
 /// Returns `Some(count <= limit)` on success, recording failures for operators.
 ///
-/// The counter key carries a 1-second TTL set via `EXPIRE` so the window
-/// resets in real time instead of accumulating forever. On any I/O or RESP
-/// error the failure is recorded (retrievable via
-/// [`last_redis_rate_limit_error`]) and `None` is returned so callers can
-/// fail open while remaining observable.
+/// The counter key carries a TTL of `window_secs` seconds set via `EXPIRE`
+/// (see [`check_redis_rate_limit_with_window`]) so the fixed window resets in
+/// real time instead of accumulating forever. On any I/O or RESP error the
+/// failure is recorded (retrievable via [`last_redis_rate_limit_error`]) and
+/// `None` is returned so callers can fail open while remaining observable.
 pub fn check_redis_rate_limit(redis_url: &str, key: &str, limit: u64) -> Option<bool> {
     check_redis_rate_limit_with_window(redis_url, key, limit, 1)
 }

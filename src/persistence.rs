@@ -273,6 +273,8 @@ pub fn handle_register_tenant(
             r#"{"error":"unauthorized_admin"}"#.to_string(),
         );
     }
+    // snake_case is primary (docs/API.md); camelCase aliases keep
+    // sonaraim-admin provisionB2bTenant (tenantDid/apiKey/seats) working.
     let did = json_str(&req.body, "tenant_did")
         .or_else(|| json_str(&req.body, "did"))
         .or_else(|| json_str(&req.body, "tenantDid"))
