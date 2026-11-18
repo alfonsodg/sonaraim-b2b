@@ -11,10 +11,13 @@ Tenant-scoped routes additionally require the `{did}` path segment to match
 the authenticated tenant (`403 forbidden_tenant_mismatch` otherwise).
 
 ```http
-Authorization: Bearer <B2B_API_KEY>
+Authorization: Bearer <tenant-api-key>
 X-Sonaraim-Signature: sha256=<hex-hmac>
 X-Sonaraim-Admin-Key: <B2B_KMS_MASTER_KEY>
 ```
+
+Tenant Bearer tokens are the per-tenant `api_key` values provisioned via
+`POST /v1/tenants` (there is no `B2B_API_KEY` environment variable).
 
 For tenant administration endpoints (`POST /v1/tenants`), the
 `X-Sonaraim-Admin-Key` header must equal `B2B_KMS_MASTER_KEY`.

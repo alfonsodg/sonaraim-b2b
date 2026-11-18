@@ -30,6 +30,11 @@ All runtime settings in `sonaraim-b2b` are explicitly loaded from process enviro
 | `B2B_REDIS_URL` / `REDIS_URL` | `String` | No | Redis connection URL for distributed promotional rate limiting. | `redis://:secret@redis:6379/1` |
 | `B2B_PROMO_WINDOW_SECS` | `u64` | No | Rate-limit window length in seconds (default `1`). | `1` |
 
+> Test-only: `B2B_TEST_NOW_OFFSET_SECS` (integer seconds, default `0`) shifts
+> the wall clock used by the in-memory promotional rate limiter. It exists so
+> `tests/issue20_window_test.rs` can advance the fixed window deterministically
+> without sleeping; never set it in production.
+>
 > Roadmap: `POSTGRES_DSN` is not implemented (no PostgreSQL client exists in this crate).
 
 ---
