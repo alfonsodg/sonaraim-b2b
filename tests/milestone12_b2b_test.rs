@@ -199,7 +199,10 @@ fn milestone12_card_actions_route_enforces_timestamp_replay_window_live() {
 
     let fresh =
         format!("{{\"card_id\":\"c-live\",\"action_id\":\"approve\",\"webhook_timestamp\":{now}}}");
-    let fresh_sig = compute_webhook_signature(b"sk_live_replay_1", &fresh);
+    let fresh_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:live-replay.example.com"),
+        &fresh,
+    );
     let (st, resp) = send_http(
         &addr,
         "POST",
@@ -216,7 +219,10 @@ fn milestone12_card_actions_route_enforces_timestamp_replay_window_live() {
         "{{\"card_id\":\"c-live\",\"action_id\":\"approve\",\"webhook_timestamp\":{}}}",
         now.saturating_sub(3_600)
     );
-    let stale_sig = compute_webhook_signature(b"sk_live_replay_1", &stale);
+    let stale_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:live-replay.example.com"),
+        &stale,
+    );
     let (st, resp) = send_http(
         &addr,
         "POST",

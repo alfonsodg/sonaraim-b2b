@@ -148,7 +148,10 @@ fn card_action_rejects_forged_sig_and_tenant_idor_over_http() {
         ts_now()
     );
     let idor_body = idor_body.as_str();
-    let idor_sig = compute_webhook_signature(b"sk_alpha_1", idor_body);
+    let idor_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:alpha.example.com"),
+        idor_body,
+    );
     let (st, resp) = send_http(
         &addr,
         "POST",
@@ -179,7 +182,10 @@ fn card_action_rejects_forged_sig_and_tenant_idor_over_http() {
         ts_now()
     );
     let ok_body = ok_body.as_str();
-    let ok_sig = compute_webhook_signature(b"sk_alpha_1", ok_body);
+    let ok_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:alpha.example.com"),
+        ok_body,
+    );
     let (st, ok_resp) = send_http(
         &addr,
         "POST",
@@ -266,7 +272,10 @@ fn card_action_rejects_ssrf_callback_url_with_400_without_connecting() {
             "{{\"card_id\":\"c-9\",\"action_id\":\"pay\",\"callback_url\":\"{target}\",\"webhook_timestamp\":{}}}",
             ts_now()
         );
-        let sig = compute_webhook_signature(b"sk_ssrf_1", &body);
+        let sig = compute_webhook_signature(
+            &sonaraim_b2b::persistence::derive_signing_secret("did:web:ssrf.example.com"),
+            &body,
+        );
         let (st, resp) = send_http(
             &addr,
             "POST",

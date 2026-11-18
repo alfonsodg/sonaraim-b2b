@@ -13,6 +13,7 @@ pub mod hmac_sha256;
 pub mod http_api;
 pub mod outbound_dispatcher;
 pub mod persistence;
+pub mod rate_limit;
 pub mod routes;
 pub mod url_validator;
 pub mod webhooks;

@@ -256,7 +256,10 @@ fn outbound_webhook_dispatcher_and_node_relay_forwarding_work() {
         "{{\"card_id\":\"c-7\",\"action_id\":\"pay\",\"user_did\":\"did:sonaraim:carol\",\"callback_url\":\"{callback_url}\",\"webhook_timestamp\":{}}}",
         ts_now()
     );
-    let action_sig = compute_webhook_signature(b"sk_merchant_1", &body);
+    let action_sig = compute_webhook_signature(
+        &sonaraim_b2b::persistence::derive_signing_secret("did:web:merchant.example.com"),
+        &body,
+    );
     let act_headers = [
         ("Authorization", "Bearer sk_merchant_1"),
         ("X-Sonaraim-Signature", action_sig.as_str()),
