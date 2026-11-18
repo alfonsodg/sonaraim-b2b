@@ -25,13 +25,6 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
     }
 }
 
-fn ts_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(1_700_000_000)
-}
-
 fn send_http(
     addr: &str,
     method: &str,
