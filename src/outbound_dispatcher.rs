@@ -1,6 +1,7 @@
 //! Outbound HTTP/1.1 JSON webhook dispatcher, retry backoff client, `sonaraim-node`
 //! MLS relay forwarder, and toll-free AI Agent stream TCP listener on `B2B_GRPC_PORT`.
 
+use crate::delivery_queue::DeliveryQueue;
 use crate::http_api::B2bState;
 use crate::webhooks::json_str;
 use std::io::{self, Read, Write};
@@ -134,7 +135,37 @@ pub fn forward_to_node_relay(
     seq: u64,
     raw_message_json: &str,
 ) -> bool {
-    let url = format!("{}/v1/relay/envelopes", node_rpc_url.trim_end_matches('/'));
+    forward_to_node_relay_with_retry(
+        node_rpc_url,
+        tenant_did,
+        recipient_did,
+        seq,
+        raw_message_json,
+        2,
+    )
+    .delivered
+}
+
+/// Outcome of a relay forwarding attempt with retry accounting.
+#[derive(Debug, Clone)]
+pub struct RelayOutcome {
+    /// Whether the envelope reached the relay with a 2xx status.
+    pub delivered: bool,
+    /// Total HTTP attempts performed (including the first).
+    pub attempts: u32,
+    /// Last error message when `delivered` is false (empty when delivered).
+    pub last_error: String,
+}
+
+/// Builds the sealed MLS relay envelope payload for `{node_rpc_url}/v1/relay/envelopes`.
+fn relay_envelope_payload(
+    tenant_did: &str,
+    recipient_did: &str,
+    seq: u64,
+    raw_message_json: &str,
+) -> (String, String) {
+    let url_suffix = "/v1/relay/envelopes".to_string();
+    let _ = url_suffix;
     let now_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -149,10 +180,51 @@ pub fn forward_to_node_relay(
     let payload = format!(
         r#"{{"envelope_id":"{env_id}","recipient_mailbox_id":"{recipient_did}","recipient_did":"{recipient_did}","tenant_did":"{tenant_did}","payload_hex":"{payload_hex}"}}"#
     );
-    matches!(
-        post_json_with_timeout(&url, &[], &payload, configured_timeout_ms()),
-        Ok(status) if (200..300).contains(&status)
-    )
+    (env_id, payload)
+}
+
+/// Forwards a sealed MLS envelope with exponential-backoff retries, reporting
+/// the real outcome (attempts + last error) instead of a silent boolean.
+pub fn forward_to_node_relay_with_retry(
+    node_rpc_url: &str,
+    tenant_did: &str,
+    recipient_did: &str,
+    seq: u64,
+    raw_message_json: &str,
+    max_retries: u32,
+) -> RelayOutcome {
+    let url = format!("{}/v1/relay/envelopes", node_rpc_url.trim_end_matches('/'));
+    let (_env_id, payload) =
+        relay_envelope_payload(tenant_did, recipient_did, seq, raw_message_json);
+    let mut last_error = String::from("unattempted");
+    let mut attempts = 0u32;
+    for attempt in 0..=max_retries {
+        attempts = attempts.saturating_add(1);
+        match post_json_with_timeout(&url, &[], &payload, configured_timeout_ms()) {
+            Ok(status) if (200..300).contains(&status) => {
+                return RelayOutcome {
+                    delivered: true,
+                    attempts,
+                    last_error: String::new(),
+                };
+            }
+            Ok(status) => last_error = format!("relay upstream {status}"),
+            Err(err) => last_error = err,
+        }
+        if attempt < max_retries {
+            thread::sleep(Duration::from_millis(DeliveryQueue::backoff_ms(
+                attempt, 100,
+            )));
+        }
+    }
+    eprintln!(
+        "{{\"level\":\"WARN\",\"service\":\"sonaraim-b2b\",\"component\":\"relay_forwarder\",\"tenant_did\":\"{tenant_did}\",\"error\":\"{last_error}\"}}"
+    );
+    RelayOutcome {
+        delivered: false,
+        attempts,
+        last_error,
+    }
 }
 
 /// Starts the toll-free AI Agent stream listener on `host:grpc_port`.
