@@ -109,7 +109,7 @@ fn redis_connection_error_is_visible_not_silent() {
 #[test]
 fn in_memory_fallback_exhausts_then_resets_after_window() {
     unsafe {
-        std::env::set_var("B2B_PROMO_WINDOW_SECS", "1");
+        std::env::set_var("B2B_PROMO_WINDOW_SECS", "60");
         std::env::set_var("B2B_TEST_NOW_OFFSET_SECS", "0");
     }
     let mut cfg = sample_config(2);
@@ -124,7 +124,7 @@ fn in_memory_fallback_exhausts_then_resets_after_window() {
     );
     let (addr, handle) = start_test_server(state).expect("start server");
 
-    // limit 2 per 1s window: first two pass, third is 429.
+    // limit 2 per 60s window: first two pass, third is 429.
     for i in 0..2u32 {
         let (st, _) = send_promo(
             &addr,
@@ -140,7 +140,7 @@ fn in_memory_fallback_exhausts_then_resets_after_window() {
 
     // Advance the wall-clock window: the limit resets and dispatch passes again.
     unsafe {
-        std::env::set_var("B2B_TEST_NOW_OFFSET_SECS", "5");
+        std::env::set_var("B2B_TEST_NOW_OFFSET_SECS", "61");
     }
     let (st, _) = send_promo(&addr, "sk_promo_1", "did:sonaraim:userA", "sig_valid_99");
     assert_eq!(

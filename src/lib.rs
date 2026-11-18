@@ -8,6 +8,7 @@ pub mod billing;
 pub mod config;
 pub mod consent;
 pub mod crm_connectors;
+pub mod delivery_queue;
 pub mod fallback;
 pub mod hmac_sha256;
 pub mod http_api;
