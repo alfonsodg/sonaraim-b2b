@@ -88,6 +88,10 @@ pub struct B2bState {
     pub admin_key: Option<String>,
     /// Optional Redis URL for distributed promotional rate limiting.
     pub redis_url: Option<String>,
+    /// Optional pluggable AI inference backend URL (`B2B_AI_BACKEND_URL`).
+    pub ai_backend_url: Option<String>,
+    /// Inference model name sent to the backend (`B2B_AI_MODEL`).
+    pub ai_model: String,
 }
 
 impl B2bState {
@@ -98,6 +102,15 @@ impl B2bState {
             tenants: HashMap::new(),
             api_keys: HashMap::new(),
             revoked_consents: HashSet::new(),
+            ai_backend_url: std::env::var("B2B_AI_BACKEND_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            ai_model: std::env::var("B2B_AI_MODEL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "sonaraim-default".to_string()),
             storage_path: None,
             admin_key: std::env::var("B2B_KMS_MASTER_KEY").ok(),
             redis_url: std::env::var("REDIS_URL")
@@ -120,6 +133,20 @@ impl B2bState {
     /// Configures the Redis connection URL for promotional rate limiting.
     pub fn set_redis_url(&mut self, url: &str) {
         self.redis_url = Some(url.to_string());
+    }
+
+    /// Configures the pluggable AI inference backend URL and model name.
+    pub fn set_ai_backend(&mut self, url: &str, model: &str) {
+        let url = url.trim();
+        self.ai_backend_url = if url.is_empty() {
+            None
+        } else {
+            Some(url.to_string())
+        };
+        let model = model.trim();
+        if !model.is_empty() {
+            self.ai_model = model.to_string();
+        }
     }
 
     /// Registers an enterprise tenant with an API key, SaaS tier, and seat quota.

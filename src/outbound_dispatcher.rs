@@ -2,13 +2,12 @@
 //! MLS relay forwarder, and toll-free AI Agent stream TCP listener on `B2B_GRPC_PORT`.
 
 use crate::delivery_queue::DeliveryQueue;
-use crate::http_api::B2bState;
-use crate::webhooks::json_str;
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub use crate::ai_stream::start_ai_stream_listener;
 
 /// Parses an `http://host[:port][/path]` URL into `(host_port, path)`.
 fn parse_http_url(url: &str) -> Result<(String, String), String> {
@@ -227,31 +226,46 @@ pub fn forward_to_node_relay_with_retry(
     }
 }
 
-/// Starts the toll-free AI Agent stream listener on `host:grpc_port`.
-pub fn start_ai_stream_listener(
-    host: &str,
-    grpc_port: u16,
-    _shared: Arc<Mutex<B2bState>>,
-) -> io::Result<(String, JoinHandle<()>)> {
-    let listener = TcpListener::bind(format!("{host}:{grpc_port}"))?;
-    let bound_addr = listener.local_addr()?.to_string();
-    let handle = thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            thread::spawn(move || {
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
-                let agent_did = json_str(&req, "agent_did")
-                    .unwrap_or_else(|| "did:sonaraim:ai-agent".to_string());
-                let prompt = json_str(&req, "prompt").unwrap_or_else(|| "ready".to_string());
-                let frame = format!(
-                    "{{\"stream\":\"sonaraim.ai.v1\",\"agent_did\":\"{agent_did}\",\"toll_free\":true,\"status\":\"streaming\",\"delta\":\"Processed: {prompt}\"}}\n"
-                );
-                let _ = stream.write_all(frame.as_bytes());
-                let _ = stream.flush();
-            });
-        }
-    });
-    Ok((bound_addr, handle))
+/// POSTs a JSON body and returns the response body on 2xx, or an error string.
+pub(crate) fn post_json_with_body(
+    url: &str,
+    body: &str,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let (host_port, path) = parse_http_url(url)?;
+    let addr: SocketAddr = host_port
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve error: {e}"))?
+        .next()
+        .ok_or_else(|| "no socket address".to_string())?;
+    let timeout = Duration::from_millis(timeout_ms.max(25));
+    let mut stream =
+        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect error: {e}"))?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host_port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write error: {e}"))?;
+    let _ = stream.flush();
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("read error: {e}"))?;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let (head, resp_body) = text.split_once("\r\n\r\n").unwrap_or(("", text.as_str()));
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    if (200..300).contains(&status) {
+        Ok(resp_body.to_string())
+    } else {
+        Err(format!("backend status {status}"))
+    }
 }
