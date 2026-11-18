@@ -23,6 +23,13 @@ fn base_config() -> B2bConfig {
     }
 }
 
+fn ts_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1_700_000_000)
+}
+
 fn send_http(
     addr: &str,
     method: &str,
@@ -120,8 +127,11 @@ fn card_action_rejects_forged_sig_and_tenant_idor_over_http() {
     let (addr, handle) = start_test_server(state).expect("start server");
 
     // 1. Forged `sig_...` prefix bypass is rejected with 401
-    let body_sig_bypass =
-        r#"{"card_id":"c-1","action_id":"approve","user_signature":"sig_anything1"}"#;
+    let body_sig_bypass = format!(
+        "{{\"card_id\":\"c-1\",\"action_id\":\"approve\",\"user_signature\":\"sig_anything1\",\"webhook_timestamp\":{}}}",
+        ts_now()
+    );
+    let body_sig_bypass = body_sig_bypass.as_str();
     let (st, resp) = send_http(
         &addr,
         "POST",
@@ -133,8 +143,11 @@ fn card_action_rejects_forged_sig_and_tenant_idor_over_http() {
     assert!(resp.contains("invalid_signature"));
 
     // 2. Valid HMAC for alpha but targeting beta's tenant_did -> 403 Forbidden (IDOR blocked)
-    let idor_body =
-        r#"{"tenant_did":"did:web:beta.example.com","card_id":"c-1","action_id":"approve"}"#;
+    let idor_body = format!(
+        "{{\"tenant_did\":\"did:web:beta.example.com\",\"card_id\":\"c-1\",\"action_id\":\"approve\",\"webhook_timestamp\":{}}}",
+        ts_now()
+    );
+    let idor_body = idor_body.as_str();
     let idor_sig = compute_webhook_signature(b"sk_alpha_1", idor_body);
     let (st, resp) = send_http(
         &addr,
@@ -161,8 +174,11 @@ fn card_action_rejects_forged_sig_and_tenant_idor_over_http() {
     assert!(beta_analytics.contains("\"card_actions\":0"));
 
     // 3. Valid HMAC with matching tenant_did succeeds and increments alpha's counter
-    let ok_body =
-        r#"{"tenant_did":"did:web:alpha.example.com","card_id":"c-1","action_id":"approve"}"#;
+    let ok_body = format!(
+        "{{\"tenant_did\":\"did:web:alpha.example.com\",\"card_id\":\"c-1\",\"action_id\":\"approve\",\"webhook_timestamp\":{}}}",
+        ts_now()
+    );
+    let ok_body = ok_body.as_str();
     let ok_sig = compute_webhook_signature(b"sk_alpha_1", ok_body);
     let (st, ok_resp) = send_http(
         &addr,
@@ -246,7 +262,10 @@ fn card_action_rejects_ssrf_callback_url_with_400_without_connecting() {
     ];
 
     for target in ssrf_targets {
-        let body = format!(r#"{{"card_id":"c-9","action_id":"pay","callback_url":"{target}"}}"#);
+        let body = format!(
+            "{{\"card_id\":\"c-9\",\"action_id\":\"pay\",\"callback_url\":\"{target}\",\"webhook_timestamp\":{}}}",
+            ts_now()
+        );
         let sig = compute_webhook_signature(b"sk_ssrf_1", &body);
         let (st, resp) = send_http(
             &addr,

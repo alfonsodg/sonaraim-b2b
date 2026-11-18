@@ -9,7 +9,8 @@ use crate::outbound_dispatcher::{
 };
 use crate::url_validator::validate_callback_url;
 use crate::webhooks::{
-    HttpRequest, compute_webhook_signature, json_str, json_u64, verify_webhook_signature,
+    HttpRequest, compute_webhook_signature, json_str, json_u64, verify_timestamped_webhook,
+    verify_webhook_signature,
 };
 use crate::whatsapp_adapter::{WhatsAppCloudAdapter, WhatsAppTemplateRequest};
 use std::sync::{Arc, Mutex};
@@ -80,7 +81,16 @@ pub(crate) fn handle_whatsapp_compat(
     }
 }
 
-/// Verifies incoming card action signature, increments tenant analytics, and signs response.
+/// Returns the webhook replay window in seconds (`B2B_WEBHOOK_REPLAY_SECS`, default 300).
+pub(crate) fn webhook_replay_window_secs() -> u64 {
+    std::env::var("B2B_WEBHOOK_REPLAY_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(300)
+}
+
+/// Verifies incoming card action signature, validates the timestamp replay
 pub(crate) fn handle_card_action(
     req: &HttpRequest,
     shared: &Arc<Mutex<B2bState>>,
@@ -104,6 +114,23 @@ pub(crate) fn handle_card_action(
     let user_sig = json_str(&req.body, "user_signature").unwrap_or(header_sig);
     if !verify_webhook_signature(&tenant_secret, &req.body, &user_sig) {
         return err(401, "Unauthorized", "invalid_signature");
+    }
+    let Some(ts) = json_u64(&req.body, "webhook_timestamp") else {
+        return err(400, "Bad Request", "missing_webhook_timestamp");
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if !verify_timestamped_webhook(
+        &tenant_secret,
+        ts,
+        now_secs,
+        webhook_replay_window_secs(),
+        req.body.as_bytes(),
+        &user_sig,
+    ) {
+        return err(403, "Forbidden", "stale_webhook_timestamp");
     }
     if let Some(body_tenant) = json_str(&req.body, "tenant_did")
         && !body_tenant.trim().is_empty()

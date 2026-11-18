@@ -26,6 +26,13 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
     }
 }
 
+fn ts_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1_700_000_000)
+}
+
 fn send_http(
     addr: &str,
     method: &str,
@@ -106,8 +113,11 @@ fn http_api_enforces_auth_messages_whatsapp_webhooks_and_rate_limits() {
     assert_eq!(st, 200);
     assert!(wa_resp.contains("SONARAIM_CARD"));
 
-    let action_body =
-        r#"{"card_id":"ord-1","action_id":"confirm_handover","user_did":"did:sonaraim:alice"}"#;
+    let action_body = format!(
+        "{{\"card_id\":\"ord-1\",\"action_id\":\"confirm_handover\",\"user_did\":\"did:sonaraim:alice\",\"webhook_timestamp\":{}}}",
+        ts_now()
+    );
+    let action_body = action_body.as_str();
     let action_sig = compute_webhook_signature(b"tok-clinic-1", action_body);
     let action_headers = [
         ("Authorization", "Bearer tok-clinic-1"),
