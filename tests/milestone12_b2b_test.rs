@@ -25,6 +25,13 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
     }
 }
 
+fn ts_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1_700_000_000)
+}
+
 fn send_http(
     addr: &str,
     method: &str,
@@ -177,6 +184,58 @@ fn webhook_timestamp_replay_window_and_tenant_key_rotation_work() {
     );
     assert_eq!(st_new, 202);
 
+    drop(handle);
+}
+
+#[test]
+fn milestone12_card_actions_route_enforces_timestamp_replay_window_live() {
+    // Milestone 12 acceptance: the replay window is enforced on the live
+    // POST /v1/cards/actions route (fresh passes, stale rejected explicitly).
+    let mut state = B2bState::new(sample_config(10));
+    state.register_tenant(
+        "did:web:live-replay.example.com",
+        "sk_live_replay_1",
+        SaasPlanTier::SmbPro,
+        5,
+    );
+    let (addr, handle) = start_test_server(state).expect("start server");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1_700_000_100);
+
+    let fresh =
+        format!("{{\"card_id\":\"c-live\",\"action_id\":\"approve\",\"webhook_timestamp\":{now}}}");
+    let fresh_sig = compute_webhook_signature(b"sk_live_replay_1", &fresh);
+    let (st, resp) = send_http(
+        &addr,
+        "POST",
+        "/v1/cards/actions",
+        &[
+            ("Authorization", "Bearer sk_live_replay_1"),
+            ("X-Sonaraim-Signature", fresh_sig.as_str()),
+        ],
+        &fresh,
+    );
+    assert_eq!(st, 200, "fresh live webhook must pass: {resp}");
+
+    let stale = format!(
+        "{{\"card_id\":\"c-live\",\"action_id\":\"approve\",\"webhook_timestamp\":{}}}",
+        now.saturating_sub(3_600)
+    );
+    let stale_sig = compute_webhook_signature(b"sk_live_replay_1", &stale);
+    let (st, resp) = send_http(
+        &addr,
+        "POST",
+        "/v1/cards/actions",
+        &[
+            ("Authorization", "Bearer sk_live_replay_1"),
+            ("X-Sonaraim-Signature", stale_sig.as_str()),
+        ],
+        &stale,
+    );
+    assert_eq!(st, 403, "stale live webhook must be rejected: {resp}");
+    assert!(resp.contains("stale_webhook_timestamp"));
     drop(handle);
 }
 

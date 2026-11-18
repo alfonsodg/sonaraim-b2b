@@ -27,6 +27,13 @@ fn sample_config(promo_rps: u32) -> B2bConfig {
     }
 }
 
+fn ts_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1_700_000_000)
+}
+
 fn send_http(
     addr: &str,
     method: &str,
@@ -246,7 +253,8 @@ fn outbound_webhook_dispatcher_and_node_relay_forwarding_work() {
     // Submit card action with callback_url -> dispatches signed webhook
     let callback_url = format!("http://{hook_addr}/webhooks/sonaraim");
     let body = format!(
-        r#"{{"card_id":"c-7","action_id":"pay","user_did":"did:sonaraim:carol","callback_url":"{callback_url}"}}"#
+        "{{\"card_id\":\"c-7\",\"action_id\":\"pay\",\"user_did\":\"did:sonaraim:carol\",\"callback_url\":\"{callback_url}\",\"webhook_timestamp\":{}}}",
+        ts_now()
     );
     let action_sig = compute_webhook_signature(b"sk_merchant_1", &body);
     let act_headers = [
